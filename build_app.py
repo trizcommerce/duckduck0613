@@ -1,4 +1,4 @@
-"""덕덕 콘텐츠 캘린더 앱 빌더.
+"""덕덕님 콘텐츠 캘린더 앱 빌더.
 
 구글 시트(공개 xlsx export)를 내려받아 캘린더/제품/월별 데이터를 JSON으로 정리한 뒤
 template.html 에 넣어 모바일용 단일 HTML(duckduck_calendar.html)을 만든다.

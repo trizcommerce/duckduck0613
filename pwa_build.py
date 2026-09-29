@@ -17,8 +17,8 @@ DATA = HERE / "data.json"
 ICONS = HERE / "icons"  # 미리 만들어 둔 아이콘 (서버에는 한글 폰트가 없어서 복사해서 씀)
 PWA = HERE / "pwa"
 ZIP = HERE / "duckduck_app"
-NAME = "덕덕 콘텐츠 캘린더"
-SHORT = "덕덕 캘린더"
+NAME = "덕덕님 콘텐츠 캘린더"
+SHORT = "덕덕님 콘텐츠 캘린더"
 GREEN = "#2E6A27"
 BG = "#F3F5F0"
 

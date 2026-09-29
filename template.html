@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>덕덕 콘텐츠 캘린더</title>
+<title>덕덕님 콘텐츠 캘린더</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -305,7 +305,7 @@ if (!dataYearOk) { cur = new Date(DATA.year, 8, 1); sel = key(cur); }
 
 function renderCal() {
   const y = cur.getFullYear(), m = cur.getMonth();
-  $("#cal-year").textContent = `${y}년 · 덕덕`;
+  $("#cal-year").textContent = `${y}년 · 덕덕님`;
   $("#cal-title").textContent = `${m + 1}월`;
   const first = new Date(y, m, 1);
   const start = new Date(y, m, 1 - ((first.getDay() + 6) % 7));
