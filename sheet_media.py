@@ -296,14 +296,16 @@ def _save_small(data, out_dir):
     return name
 
 
-def extract_images(xlsx_path, out_dir):
-    """{시트 이름: {(행, 열): [파일 이름]}} — 이미지를 out_dir 에 jpg 로 저장"""
+def extract_images(xlsx_path, out_dir, only=None):
+    """{시트 이름: {(행, 열): [파일 이름]}} — 이미지를 out_dir 에 jpg 로 저장 (only: 이 시트들만)"""
     out_dir.mkdir(exist_ok=True)
     z = zipfile.ZipFile(xlsx_path)
     wb = ET.fromstring(z.read("xl/workbook.xml"))
     wb_rels = _rels(z, "xl/workbook.xml")
     saved, result = {}, {}
     for s in wb.find("m:sheets", NS):
+        if only is not None and s.get("name").strip() not in only:
+            continue
         path = wb_rels[s.get(f"{{{NS['r']}}}id")]
         s_rels = _rels(z, path)
         cells = {}

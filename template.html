@@ -450,7 +450,7 @@ function entryHTML(e, idx, opts = {}) {
   let prev = "";
   if (e.src === "slot") {
     const notes = e.slot.notes.join(" · ");
-    const first = e.slot.items.map(it => Object.entries(it).find(([k]) => k !== "__images")?.[1]).find(Boolean) || "";
+    const first = e.slot.items.map(it => Object.entries(it).find(([k]) => k !== "__images" && !k.includes("기한"))?.[1]).find(Boolean) || "";
     prev = notes || first;
   }
   const label = e.holiday ? "휴일" : FMT[e.fmt];
@@ -712,6 +712,10 @@ function monthPage(m) {
       <div class="full">${m.kind === "grid" ? "날짜별 스토리 · 피드 기획" : "기획 콘텐츠 목록 · 체크는 시트의 이행 체크박스"}</div></div>
     ${noteFolds(m.notes)}${body}`;
 }
+if (!DATA.months.length) {
+  document.querySelector('.nav [data-view="v-month"]').hidden = true;
+  document.querySelector(".nav").style.gridTemplateColumns = "repeat(2,1fr)";
+}
 const monthPager = makePager($("#month-tabs"), $("#month-pager"), DATA.months, m => esc(m.name), monthPage, "monthIdx");
 $("#month-pager").addEventListener("click", ev => {
   const b = ev.target.closest(".entry[data-m]"); if (!b) return;
@@ -750,5 +754,6 @@ const defaultProd = upcoming ? DATA.products.indexOf(upcoming) : 0;
 prodPager.init(+(store.get("prodIdx") ?? defaultProd) || 0);
 monthPager.init(+(store.get("monthIdx") ?? 0) || 0);
 const hashView = Object.entries(VIEWS).find(([, h]) => location.hash === "#" + h)?.[0];
-showView(hashView || store.get("view") || "v-cal");
+const wanted = hashView || store.get("view") || "v-cal";
+showView(wanted === "v-month" && !DATA.months.length ? "v-cal" : wanted);
 </script>

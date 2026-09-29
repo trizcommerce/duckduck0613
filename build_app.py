@@ -34,10 +34,22 @@ PALETTE = ["#A4C2F4", "#F9CB9C", "#B6D7A8", "#D9D2E9", "#FFE599", "#EA9999", "#A
 HOLIDAY_FILL = "FFF3F3F3"
 
 
-def download():
+def download(tries=4):
+    """시트 xlsx 받기 — 파일이 커서 중간에 끊기면 다시 시도"""
+    import time
+    import zipfile
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
-    with urllib.request.urlopen(url) as r:
-        XLSX.write_bytes(r.read())
+    for i in range(1, tries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=600) as r:
+                XLSX.write_bytes(r.read())
+            zipfile.ZipFile(XLSX).testzip()  # 덜 받은 파일 걸러내기
+            return
+        except Exception as e:
+            print(f"download try {i} failed: {e}")
+            if i == tries:
+                raise
+            time.sleep(20 * i)
 
 
 def norm(s):
@@ -47,6 +59,8 @@ def norm(s):
 def text(v):
     if v is None or isinstance(v, bool):
         return ""
+    if isinstance(v, dt.datetime):
+        return f"{v.month}/{v.day}"
     if isinstance(v, float) and v.is_integer():
         v = int(v)
     return str(v).strip()
@@ -100,8 +114,11 @@ def parse_calendar(ws, product_keys):
             legend[fill(g)] = text(h.value)
 
     merged = {(m.min_row, m.min_col): m for m in ws.merged_cells.ranges}
-    month, week_rows, header_rows = None, [], set()
+    month, week_rows, header_rows, cur_year = None, [], set(), None
     for r in range(1, ws.max_row + 1):
+        years = {v.year for v in (ws.cell(r, c).value for c in range(2, 19)) if isinstance(v, dt.datetime)}
+        if years:
+            cur_year = max(years)
         b = ws.cell(r, 2).value
         month_label = text(ws.cell(r, 12).value)
         if re.fullmatch(r"\d{1,2}월", month_label):
@@ -113,7 +130,8 @@ def parse_calendar(ws, product_keys):
             v = ws[f"{c}{r}"].value
             if isinstance(v, dt.datetime) and v.year == YEAR:
                 dates[i] = v.day
-            elif isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer() and 1 <= v <= 31:
+            elif (isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer() and 1 <= v <= 31
+                  and cur_year in (None, YEAR)):
                 dates[i] = int(v)
         if len(dates) == 1 and not any(isinstance(ws[f"{c}{r}"].value, dt.datetime) for c in CAL_COLS):
             dates = {}  # 숫자 하나만 있는 행은 날짜 행으로 보지 않음
@@ -158,6 +176,8 @@ FORMAT_RE = re.compile(r"(스토리|릴스|게시글|게시물|캐러셀|피드|
 def parse_period(s):
     m = re.search(r"(\d{1,2})/(\d{1,2})\s*\([^)]*\)\s*~\s*(\d{1,2})/(\d{1,2})", s)
     if not m:
+        m = re.search(r"\d{2}\.(\d{2})\.(\d{2})\s*~\s*\d{2}\.(\d{2})\.(\d{2})", s)
+    if not m:
         return None
     a = dt.date(YEAR, int(m[1]), int(m[2]))
     b = dt.date(YEAR, int(m[3]), int(m[4]))
@@ -184,51 +204,114 @@ def split_topic(b):
     return fmt, " ".join(title), notes
 
 
+DATE_HEADERS = ("일정", "업로드 일자")
+
+
+def find_header(ws):
+    """(헤더 행, 날짜 열) — 제품 탭이 아니면 None"""
+    for r in range(1, 16):
+        for c in (1, 2):
+            if text(ws.cell(r, c).value) in DATE_HEADERS:
+                return r, c
+    return None
+
+
+def slot_label(a):
+    """'D-12\n9/26(토)' → 'D-12', '9/29 오픈 (화)' → 'OPEN', 날짜뿐이면 ''"""
+    m = re.search(r"D\s*[-+]\s*\d+|OPEN|오픈", a, re.I)
+    if m:
+        return "OPEN" if m[0] in ("오픈",) or m[0].upper() == "OPEN" else re.sub(r"\s+", "", m[0]).upper()
+    first = a.split("\n")[0].split(" ")[0].strip()
+    return "" if DATE_RE.match(first) else first
+
+
+def kind_topic(kind, title):
+    """업로드 일자형 탭: (형식, 제목, 메모)"""
+    kind, title = kind.strip(), title.strip()
+    m = re.match(r"\[(.+?)\]\s*(.*)", title, re.S)
+    if m and not kind:
+        kind, title = m[1], m[2]
+    both = kind + " " + title
+    if "스토리" in kind or (not kind and "스토리" in title):
+        fmt = "스토리"
+    elif FORMAT_RE.search(kind):
+        fmt = FORMAT_RE.search(kind)[1]
+    elif "일상" in both or "자율" in both:
+        fmt = "자유일상"
+    else:
+        fmt = "기타"
+    title = " ".join(l.strip() for l in title.split("\n") if l.strip())
+    if not title and fmt not in ("스토리",) and kind and not FORMAT_RE.search(kind):
+        title = kind
+    return fmt, title, []
+
+
 def parse_product(ws, colors):
     skip = top_left_only(ws)
 
     def val(r, c):
         return "" if (r, c) in skip else text(ws.cell(r, c).value)
 
-    header_row = next(r for r in range(1, 15) if val(r, 1) == "일정")
-    headers = {c: val(header_row, c) for c in range(3, ws.max_column + 1) if val(header_row, c)}
+    header_row, date_col = find_header(ws)
+    head = {c: val(header_row, c) for c in range(date_col, ws.max_column + 1) if val(header_row, c)}
+    upload_style = head[date_col] == "업로드 일자"
+    if upload_style:  # 업로드 일자 | 촬영 기한 | 콘텐츠 유형 | 콘텐츠 주제 | …
+        kind_col = next((c for c, h in head.items() if "유형" in h), None)
+        title_col = next((c for c, h in head.items() if "주제" in h), None)
+        topic_cols = [c for c in (kind_col, title_col) if c]
+        headers = {c: h for c, h in head.items() if c != date_col and c not in topic_cols}
+    else:  # 일정 | 주제 | 제작 의도 | …
+        topic_cols = [date_col + 1]
+        headers = {c: h for c, h in head.items() if c > date_col + 1}
 
-    info, period, product_line = [], None, None
+    info, period, product_line, top_lines = [], None, None, []
     for r in range(1, header_row):
-        t = val(r, 1)
+        t = val(r, 1) or val(r, 2)
+        top_lines += t.split("\n")
+        c0 = 1 if val(r, 1) else 2
         if not t:
+            continue
+        if "📍" not in t and "\n" not in t:  # 업로드 일자형: "방효선 X 쑥세럼&크림 8/26(수) ~ 8/30(일)"
+            period = period or parse_period(t)
+            if len(t.strip()) > 4:
+                info.append({"label": "공구", "text": shown(ws, r, c0, t)})
             continue
         for block in re.split(r"\n\s*\n(?=📍)", t):
             block = block.strip()
-            head, _, body = block.partition("\n")
-            head = head.replace("📍", "").strip()
-            if "공구일정" in head:
-                period = parse_period(head)
-            if "공구상품" in head:
-                product_line = head.split(":", 1)[-1].strip()
-            if ":" in head and not body:
-                k, v = head.split(":", 1)
-                info.append({"label": k.strip(), "text": shown(ws, r, 1, v.strip())})
+            head_line, _, body = block.partition("\n")
+            head_line = head_line.replace("📍", "").strip()
+            if "공구일정" in head_line:
+                period = parse_period(head_line)
+            if "공구상품" in head_line:
+                product_line = head_line.split(":", 1)[-1].strip()
+            if ":" in head_line and not body:
+                k, v = head_line.split(":", 1)
+                info.append({"label": k.strip(), "text": shown(ws, r, c0, v.strip())})
             else:
-                label, _, rest = head.partition(":")
+                label, _, rest = head_line.partition(":")
                 body = (rest.strip() + "\n" + body).strip() if rest.strip() else body
-                info.append({"label": label.strip(), "text": shown(ws, r, 1, body.strip())})
+                info.append({"label": label.strip(), "text": shown(ws, r, c0, body.strip())})
 
-    # A/B 는 병합 셀이 많아 값 전파
-    a_merge, b_merge = {}, {}
+    # 날짜·주제 칸은 병합이 많아 값 전파
+    merge_top = {}
     for m in ws.merged_cells.ranges:
         for r in range(m.min_row, m.max_row + 1):
-            if m.min_col == 1:
-                a_merge[r] = m.min_row
-            if m.min_col == 2:
-                b_merge[r] = m.min_row
+            if m.min_col in (date_col, *topic_cols):
+                merge_top[(r, m.min_col)] = m.min_row
+
+    def cell_text(r, c):
+        return text(ws.cell(merge_top.get((r, c), r), c).value) if c else ""
+
+    def is_new(r, c, v):
+        return bool(v) and merge_top.get((r, c), r) == r
 
     info_images = [i for r in range(1, header_row) for i in row_images(ws, r)]
     pending = row_images(ws, header_row)  # 헤더 줄에 걸쳐 놓인 이미지는 첫 행 것
     slots, cur, last_a = [], None, ""
     for r in range(header_row + 1, ws.max_row + 1):
-        a = text(ws.cell(a_merge.get(r, r), 1).value)
-        b = text(ws.cell(b_merge.get(r, r), 2).value)
+        a = cell_text(r, date_col)
+        tops = [cell_text(r, c) for c in topic_cols]
+        b = "\n\n".join(t for t in tops if t)
         fields = {}
         for c, h in headers.items():
             v = val(r, c)
@@ -238,15 +321,18 @@ def parse_product(ws, colors):
         pending = []
         if not (a or b or fields or imgs):
             continue
-        new_a = a and (r not in a_merge or a_merge[r] == r)
-        new_b = b and (r not in b_merge or b_merge[r] == r)
+        new_a = is_new(r, date_col, a)
+        new_b = any(is_new(r, c, t) for c, t in zip(topic_cols, tops))
         if cur is None or new_a or new_b:
             a = a or last_a
             last_a = a
             m = DATE_RE.search(a)
-            fmt, title, notes = split_topic(b)
+            if upload_style:
+                fmt, title, notes = kind_topic(*(tops + ["", ""])[:2]) if len(topic_cols) == 2 else kind_topic("", b)
+            else:
+                fmt, title, notes = split_topic(b)
             cur = {
-                "label": a.split("\n")[0].split(" ")[0].strip(),
+                "label": slot_label(a),
                 "date": iso(dt.date(YEAR, int(m[1]), int(m[2]))) if m else None,
                 "format": fmt or "기타",
                 "title": title,
@@ -266,15 +352,34 @@ def parse_product(ws, colors):
                 cur["items"].append({})
             cur["items"][-1].setdefault("__images", []).extend(imgs)
 
+    for sl in slots:  # 제목이 비어 있으면 내용 첫 줄로 (예: "✨방학!!!!✨"), 주소·날짜 칸은 제외
+        if not sl["title"] and sl["format"] not in ("스토리",) and upload_style:
+            lines = [ln.strip() for it in sl["items"] for k, v in it.items() if k != "__images" and "기한" not in k
+                     for ln in re.sub(r"⟪[^⟫]*⟫|⟦([^|⟧]*)\|[^⟧]*⟧", lambda x: x.group(1) or "", v).split("\n")]
+            lines += [ln.strip() for it in sl["items"] for k, v in it.items() if "기한" in k
+                      for ln in re.sub(r"⟪[^⟫]*⟫|⟦([^|⟧]*)\|[^⟧]*⟧", lambda x: x.group(1) or "", v).split("\n")]
+            line = next((ln for ln in lines if ln and not ln.startswith("http") and not DATE_RE.fullmatch(ln)), "")
+            sl["title"] = line[:40] or ("참고 링크" if any(ln.startswith("http") for ln in lines) else "")
+    if period is None:
+        period = next((pp for pp in map(parse_period, top_lines) if pp), None)
+    if period is None:  # 기간 표기가 없으면 OPEN ~ 마지막 D+ 날짜
+        opens = [sl["date"] for sl in slots if sl["label"] == "OPEN" and sl["date"]]
+        if opens:
+            after = [sl["date"] for sl in slots if sl["label"].startswith("D+") and sl["date"]]
+            period = [opens[0], max(after + opens)]
+
     name = ws.title.strip()
     base = norm(name)
     color = next((c for n, c in colors.items() if norm(n) == base), None)
     if color is None:
         color = PALETTE[sum(map(ord, base)) % len(PALETTE)]
     round_m = re.search(r"(\d)차", name)
+    seller = CONFIG["seller"].removesuffix("님")
+    display = re.sub(r"^\d{2}\.\d{1,2}[\s_]*", "", name)             # "26.09 방탄커피" → "방탄커피"
+    display = re.sub(rf"^{re.escape(seller)}\s*[xX×]\s*", "", display)  # "방효선x헤어 2종" → "헤어 2종"
     return {
         "id": "p" + re.sub(r"\W", "", base) + (round_m[1] if round_m else ""),
-        "name": re.sub(r"\s*\(?\d차\)?", "", name).strip(),
+        "name": re.sub(r"\s*\(?\d차\)?", "", display).strip(),
         "round": f"{round_m[1]}차" if round_m else "",
         "fullName": product_line,
         "color": color,
@@ -473,13 +578,13 @@ def main():
         print("links: htmlview 실패, xlsx 링크로 대체 -", e)
         links = {}
     FORMATS.update(sheet_media.collect_formats(wb, links))
-    IMAGES.update(sheet_media.extract_images(XLSX, MEDIA))
+    visible = {ws.title.strip() for ws in wb.worksheets if ws.sheet_state == "visible"}
+    IMAGES.update(sheet_media.extract_images(XLSX, MEDIA, only=visible))
     print("images:", sum(len(v) for cells in IMAGES.values() for v in cells.values()))
     sheets = [ws for ws in wb.worksheets if ws.sheet_state == "visible"]
     cal = next(ws for ws in sheets if "캘린더" in ws.title)
-    product_sheets = [ws for ws in sheets
-                      if any(text(ws.cell(r, 1).value) == "일정" for r in range(1, 15))]
-    month_sheets = [ws for ws in sheets if re.match(r"\d{2}\.\d{2}", ws.title.strip())]
+    product_sheets = [ws for ws in sheets if ws is not cal and find_header(ws)]
+    month_sheets = [ws for ws in sheets if ws not in product_sheets and re.match(r"\d{2}\.\d{2}", ws.title.strip())]
     events, colors = parse_calendar(cal, {norm(ws.title) for ws in product_sheets})
     products = [parse_product(ws, colors) for ws in product_sheets]
     months = [parse_month(ws) for ws in month_sheets]
@@ -490,7 +595,8 @@ def main():
             ds = [s["date"] for s in p["slots"] if s["date"]] + (p["period"] or [])
             return min(abs((dt.date.fromisoformat(d) - dt.date.fromisoformat(e["date"])).days) for d in ds)
         e["product"] = min(cands, key=dist)["id"] if cands else None
-    products.sort(key=lambda p: (p["period"] or ["9999"])[0], reverse=True)
+    products.sort(key=lambda p: (p["period"] or [max((s["date"] for s in p["slots"] if s["date"]), default="0000")])[0],
+                  reverse=True)
     months.sort(key=lambda m: m["month"], reverse=True)
     data = {
         "updated": dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M"),
