@@ -10,7 +10,7 @@
   --bg:#F3F5F0; --surface:#FFFFFF; --surface-2:#E9EDE5; --ink:#1C261E; --muted:#667063; --line:#DCE1D6;
   --accent:#2E6A27; --accent-ink:#FFFFFF; --accent-soft:#DDEBD8; --today:#2E6A27;
   --sun:#B5412F; --sat:#3B5E9A; --chip-ink:#1C261E; --shadow:0 1px 2px rgba(28,38,30,.06),0 6px 24px rgba(28,38,30,.08);
-  --scrim:rgba(20,26,21,.42);
+  --scrim:rgba(20,26,21,.42); --link:#1155CC;
   --display:"Hahmlet","Nanum Myeongjo",Georgia,serif;
   --body:"IBM Plex Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;
   --nav-h:62px;
@@ -21,6 +21,7 @@
     --bg:#111512; --surface:#1A201B; --surface-2:#232A24; --ink:#E4EAE1; --muted:#9AA596; --line:#2E372F;
     --accent:#8CC97F; --accent-ink:#0F1A0D; --accent-soft:#25351F; --today:#8CC97F;
     --sun:#F08E7B; --sat:#90B2EE; --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 28px rgba(0,0,0,.35); --scrim:rgba(0,0,0,.6);
+    --link:#8AB4F8;
   }
 }
 :root[data-theme="dark"]{
@@ -28,6 +29,7 @@
   --bg:#111512; --surface:#1A201B; --surface-2:#232A24; --ink:#E4EAE1; --muted:#9AA596; --line:#2E372F;
   --accent:#8CC97F; --accent-ink:#0F1A0D; --accent-soft:#25351F; --today:#8CC97F;
   --sun:#F08E7B; --sat:#90B2EE; --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 28px rgba(0,0,0,.35); --scrim:rgba(0,0,0,.6);
+  --link:#8AB4F8;
 }
 *,*::before,*::after{box-sizing:border-box}
 html,body{height:100%}
@@ -181,8 +183,8 @@ details.fold[open] summary::after{transform:rotate(-135deg);margin-top:4px}
 .fx-z1{font-size:1.14em} .fx-z2{font-size:1.3em;line-height:1.45} .fx-zm{font-size:.88em}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .fx-c{color:color-mix(in srgb,var(--fc) 55%,#fff)}}
 :root[data-theme="dark"] .fx-c{color:color-mix(in srgb,var(--fc) 55%,#fff)}
-.tx a.ref{display:inline-flex;align-items:center;gap:3px;font-weight:600;text-decoration:none;border-bottom:1.5px solid color-mix(in srgb,var(--accent) 45%,transparent)}
-.tx a.ref::after{content:"↗";font-size:.85em}
+.tx a.ref{color:var(--link);text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere}
+.tx .fx-c a.ref{color:inherit}
 .viewer{position:fixed;inset:0;z-index:60;background:rgba(8,10,8,.94);display:flex;flex-direction:column}
 .viewer[hidden]{display:none!important}
 .viewer .bar{display:flex;justify-content:space-between;align-items:center;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 10px;color:#fff;font-size:14px;font-variant-numeric:tabular-nums}

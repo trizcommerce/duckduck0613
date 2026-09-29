@@ -119,16 +119,44 @@ def fetch_links(sheet_id):
 #   ⟦문구|주소⟧                 : 링크
 # 시트 구조를 읽을 때는 표시 없는 글자를 쓰고, 화면에 보일 칸만 표시 있는 글자로 바꾼다.
 FMT_OPEN, FMT_CLOSE_TAG = "⟪", "⟪/⟫"
-PLAIN_COLORS = {"000000", "1F1F1F", "1155CC"}  # 기본 검정, 시트 링크 파랑은 따로 표시하지 않음
+PLAIN_COLORS = {"000000", "1F1F1F"}  # 기본 검정은 앱 기본 글자색으로
+THEME = []  # 워크북 테마 색 (collect_formats 에서 채움)
+
+
+def _theme_palette(wb):
+    """테마 색 목록 — 엑셀 테마 번호 순서 (0,1 과 2,3 은 밝은/어두운 색이 바뀌어 있음)"""
+    raw = getattr(wb, "loaded_theme", None)
+    if not raw:
+        return []
+    raw = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    names = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"]
+    found = dict(re.findall(r"<a:(\w+)>\s*<a:(?:srgbClr val|sysClr [^>]*lastClr)=\"([0-9A-Fa-f]{6})\"", raw))
+    order = ["lt1", "dk1", "lt2", "dk2"] + names[4:]
+    return [found.get(n, "000000").upper() for n in order]
+
+
+def _tint(rgb, tint):
+    if not tint:
+        return rgb
+    ch = [int(rgb[i:i + 2], 16) for i in (0, 2, 4)]
+    ch = [round(c + (255 - c) * tint) if tint > 0 else round(c * (1 + tint)) for c in ch]
+    return "".join(f"{max(0, min(255, c)):02X}" for c in ch)
 
 
 def _color(font):
     col = getattr(font, "color", None) if font is not None else None
-    rgb = getattr(col, "rgb", None) if col is not None else None
+    if col is None:
+        return None
+    rgb = getattr(col, "rgb", None)
+    if getattr(col, "type", None) == "theme" and isinstance(getattr(col, "theme", None), int) and col.theme < len(THEME):
+        rgb = _tint(THEME[col.theme], getattr(col, "tint", 0) or 0)
     if not isinstance(rgb, str) or len(rgb) < 6:
-        return None  # 테마 색 등은 기본 글자색으로
+        return None
     rgb = rgb[-6:].upper()
-    return None if rgb in PLAIN_COLORS else rgb
+    r, g, b = (int(rgb[i:i + 2], 16) for i in (0, 2, 4))
+    if rgb in PLAIN_COLORS or (0.299 * r + 0.587 * g + 0.114 * b) > 225:
+        return None  # 검정·흰색(칸 배경색 위 글자)은 앱 기본 글자색으로
+    return rgb
 
 
 def _style(font, cell_font):
@@ -139,14 +167,12 @@ def _style(font, cell_font):
         v = getattr(f, k, None)
         return v if v is not None else getattr(cell_font, k, None)
 
-    has_color = getattr(getattr(f, "color", None), "rgb", None) is not None
-    raw = getattr(getattr(f if has_color else cell_font, "color", None), "rgb", None)
-    link_blue = isinstance(raw, str) and raw.upper().endswith("1155CC")  # 시트 링크 모양은 링크로만 표시
+    has_color = getattr(f, "color", None) is not None
     size = get("sz")
     return {
         "b": bool(get("b")),
         "i": bool(get("i")),
-        "u": bool(get("u")) and not link_blue,
+        "u": bool(get("u")),
         "s": bool(get("strike")),
         "c": _color(f if has_color else cell_font),
         "sz": float(size) if size else None,
@@ -251,6 +277,7 @@ class CellFormat:
 def collect_formats(wb, links_by_sheet):
     """{(시트, 행, 열): CellFormat} 를 만들고, 셀 값은 표시 없는 글자로 되돌린다"""
     from openpyxl.cell.rich_text import CellRichText
+    THEME[:] = _theme_palette(wb)
     out = {}
     for ws in wb.worksheets:
         name = ws.title.strip()
