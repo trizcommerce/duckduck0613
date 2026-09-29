@@ -17,8 +17,9 @@ DATA = HERE / "data.json"
 ICONS = HERE / "icons"  # 미리 만들어 둔 아이콘 (서버에는 한글 폰트가 없어서 복사해서 씀)
 PWA = HERE / "pwa"
 ZIP = HERE / "duckduck_app"
-NAME = "덕덕님 콘텐츠 캘린더"
-SHORT = "덕덕님 콘텐츠 캘린더"
+CONFIG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+NAME = CONFIG["app_name"]
+SHORT = CONFIG.get("short_name", NAME)
 GREEN = "#2E6A27"
 BG = "#F3F5F0"
 
@@ -80,7 +81,7 @@ def icon(size, path):
         cx = x0 + w * fx
         d.rounded_rectangle([cx - s * 0.018, y0 - s * 0.05, cx + s * 0.018, y0 + s * 0.05], s * 0.018, fill="#FFFFFF")
     font = ImageFont.truetype(r"C:\Windows\Fonts\malgunbd.ttf", int(s * 0.21))
-    d.text((s / 2, y0 + h * 0.63), "덕", font=font, fill=GREEN, anchor="mm")
+    d.text((s / 2, y0 + h * 0.63), CONFIG.get("icon_char", NAME[0]), font=font, fill=GREEN, anchor="mm")
     im.resize((size, size), Image.LANCZOS).save(path)
 
 

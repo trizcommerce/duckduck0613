@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>덕덕님 콘텐츠 캘린더</title>
+<title>__APP_NAME__</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -226,7 +226,7 @@ details.fold[open] summary::after{transform:rotate(-135deg);margin-top:4px}
 const DATA = /*__DATA__*/null;
 const $ = s => document.querySelector(s);
 const DOW = ["일","월","화","수","목","금","토"];
-const FMT = {reel:"릴스", post:"피드", story:"스토리", qa:"무물", live:"라방", meeting:"일정", free:"자율", etc:"기타"};
+const FMT = {reel:"릴스", post:"피드", story:"스토리", qa:"무물", live:"라방", ad:"광고", meeting:"일정", free:"자율", etc:"기타"};
 const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -238,9 +238,12 @@ const md = k => { const d = parse(k); return `${d.getMonth() + 1}.${d.getDate()}
 const mdDow = k => { const d = parse(k); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${DOW[d.getDay()]}요일`; };
 const TODAY = key(new Date());
 const normT = s => (s || "").replace(/[\s\p{P}\p{S}]/gu, "");
+const similar = (a, b) => { a = normT(stripFmt(a)); b = normT(stripFmt(b)); if (a.length < 4 || b.length < 4) return a === b;
+  return a.includes(b.slice(0, 6)) || b.includes(a.slice(0, 6)); };
 
 function fmtOf(s) {
   s = s || "";
+  if (/광고/.test(s)) return "ad";
   if (/릴스/.test(s)) return "reel";
   if (/캐러셀|게시글|게시물|피드/.test(s)) return "post";
   if (/무물/.test(s)) return "qa";
@@ -266,28 +269,54 @@ DATA.products.forEach(p => p.slots.forEach((s, i) => {
 
 DATA.events.forEach(ev => {
   const k = ev.date;
+  if (ev.end > ev.date && ev.kind === "content") { // 여러 날에 걸친 칸 = 여행·출장 같은 일정
+    for (let d = parse(ev.date); key(d) <= ev.end; d.setDate(d.getDate() + 1))
+      push(key(d), {src: "event", ev, fmt: "meeting", title: ev.text.replace(/\n/g, " "), sort: 0});
+    return;
+  }
   if (ev.kind !== "content") {
     push(k, {src: "event", ev, fmt: "meeting", title: ev.text.replace(/\n/g, " "), sort: 0, holiday: ev.kind === "holiday"});
     return;
   }
   const list = byDate[k] || [];
   const isStory = ev.text.trim() === "스토리";
-  const match = list.find(e => e.src === "slot" && !e.matched && e.pid === ev.product &&
-    (isStory ? e.fmt === "story" : (normT(e.title).includes(normT(ev.text).slice(0, 6)) || normT(ev.text).includes(normT(e.title).slice(0, 6)))));
+  const match = list.find(e => e.src === "slot" && !e.matched && (e.pid === ev.product || !ev.product) &&
+    (isStory ? e.fmt === "story" : similar(e.title, ev.text)));
   if (match) { match.matched = true; return; }
-  push(k, {src: "event", ev, pid: ev.product, fmt: isStory ? "story" : fmtOf(ev.text) === "etc" ? "reel" : fmtOf(ev.text),
+  if (!ev.product && /커머스|공구/.test(ev.text)) {
+    const hit = DATA.products.find(p => p.slots.some(s => s.title && similar(s.title, ev.text)));
+    if (hit) ev.product = hit.id;
+  }
+  push(k, {src: "event", ev, pid: ev.product, fmt: isStory ? "story" : fmtOf(ev.text) === "etc" ? (ev.product ? "reel" : "meeting") : fmtOf(ev.text),
     title: isStory ? `${P[ev.product]?.name || ""} 스토리`.trim() : ev.text.replace(/\n/g, " "), sort: isStory ? 2 : 1});
 });
 
+const isTopic = l => l === "주제" || l === "콘텐츠";
+const topicTitle = t => { // "[릴스]" 한 줄 + 제목 줄로 나뉜 경우 합치기
+  const ls = t.split("\n").map(x => x.trim()).filter(Boolean);
+  return /^\[[^\]]+\]$/.test(ls[0] || "") && ls[1] ? `${ls[0]} ${ls[1]}` : (ls[0] || "");
+};
+const storyTitle = t => t.replace(/^[✔\s]+/, "").replace(/^\[스토리\]\s*>?\s*/, "").split("\n")[0] || "스토리";
+function dayGroups(d) { // 하루 칸을 콘텐츠 단위로 묶기: 주제/콘텐츠 행마다 새 묶음, 스토리는 따로
+  const topics = [], stories = [];
+  d.fields.forEach(x => {
+    if (x.label === "스토리") stories.push(x);
+    else if (isTopic(x.label) || !topics.length) topics.push([x]);
+    else topics[topics.length - 1].push(x);
+  });
+  return {topics: topics.filter(g => isTopic(g[0].label)), stories};
+}
 DATA.months.filter(m => m.kind === "grid").forEach(m => m.days.forEach(d => {
-  const f = Object.fromEntries(d.fields.map(x => [x.label, x.text]));
-  if (f["주제"]) {
-    const topic = f["주제"].split("\n").map(x => x.trim()).filter(Boolean);
-    push(d.date, {src: "month", mid: m.id, day: d, fmt: fmtOf(topic[0]), title: stripFmt(topic[0]) || topic[0], sort: 1,
-      fields: d.fields.filter(x => x.label !== "스토리")});
-  }
-  if (f["스토리"]) push(d.date, {src: "month", mid: m.id, day: d, fmt: "story", title: f["스토리"].replace(/^[✔\s]+/, "").split("\n")[0], sort: 2,
-    fields: [{label: "스토리", text: f["스토리"]}]});
+  const {topics, stories} = dayGroups(d);
+  topics.forEach(g => {
+    const first = topicTitle(g[0].text);
+    const entry = {src: "month", mid: m.id, day: d, fmt: fmtOf(first), title: stripFmt(first) || first, sort: 1, fields: g};
+    const list = byDate[d.date] || [];
+    if (/커머스|공구/.test(first) && list.some(e => e.src === "slot" && e.fmt !== "story")) return;
+    const dup = list.findIndex(e => e.src === "event" && !e.holiday && similar(e.title, first));
+    if (dup >= 0) { entry.pid = list[dup].pid; list[dup] = entry; } else push(d.date, entry);
+  });
+  stories.forEach(x => push(d.date, {src: "month", mid: m.id, day: d, fmt: "story", title: storyTitle(x.text), sort: 2, fields: [x]}));
   if (d.holiday) push(d.date, {src: "event", fmt: "meeting", title: d.holiday, sort: 0, holiday: true, ev: {text: d.holiday}});
 }));
 Object.values(byDate).forEach(l => l.sort((a, b) => a.sort - b.sort));
@@ -305,7 +334,7 @@ if (!dataYearOk) { cur = new Date(DATA.year, 8, 1); sel = key(cur); }
 
 function renderCal() {
   const y = cur.getFullYear(), m = cur.getMonth();
-  $("#cal-year").textContent = `${y}년 · 덕덕님`;
+  $("#cal-year").textContent = `${y}년 · __SELLER__`;
   $("#cal-title").textContent = `${m + 1}월`;
   const first = new Date(y, m, 1);
   const start = new Date(y, m, 1 - ((first.getDay() + 6) % 7));
@@ -556,11 +585,13 @@ function monthPage(m) {
   if (m.kind === "grid") {
     body = `<div class="sec-h"><h3>날짜별 기획</h3><small>${m.days.length}일</small></div><div class="tl">` + m.days.map((d, di) => {
       const dt = parse(d.date);
-      const f = Object.fromEntries(d.fields.map(x => [x.label, x.text]));
-      const items = [];
-      if (f["주제"]) { const t = f["주제"].split("\n").map(x => x.trim()).filter(Boolean)[0];
-        items.push(`<button type="button" class="entry" data-m="${mi}:${di}:t"><span class="fmt ${fmtOf(t)}">${FMT[fmtOf(t)]}</span><span class="e-body"><span class="e-title">${esc(stripFmt(t) || t)}</span>${f["기획 의도"] ? `<span class="e-prev">${esc(f["기획 의도"].replace(/\n+/g, " "))}</span>` : ""}</span><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg></button>`); }
-      if (f["스토리"]) items.push(`<button type="button" class="entry" data-m="${mi}:${di}:s"><span class="fmt story">스토리</span><span class="e-body"><span class="e-title">${esc(f["스토리"].replace(/^[✔\s]+/, "").split("\n")[0])}</span></span><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg></button>`);
+      const {topics, stories} = dayGroups(d);
+      const chev = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>`;
+      const items = topics.map((g, gi) => {
+        const t = topicTitle(g[0].text);
+        const why = g.find(x => /기획 의도|기대 효과/.test(x.label));
+        return `<button type="button" class="entry" data-m="${mi}:${di}:t${gi}"><span class="fmt ${fmtOf(t)}">${FMT[fmtOf(t)]}</span><span class="e-body"><span class="e-title">${esc(stripFmt(t) || t)}</span>${why ? `<span class="e-prev">${esc(why.text.replace(/\n+/g, " "))}</span>` : ""}</span>${chev}</button>`;
+      }).concat(stories.map((x, si) => `<button type="button" class="entry" data-m="${mi}:${di}:s${si}"><span class="fmt story">스토리</span><span class="e-body"><span class="e-title">${esc(storyTitle(x.text))}</span></span>${chev}</button>`));
       const cls = ["tl-d"]; if (d.date === TODAY) cls.push("today");
       return `<div class="tl-row"><div class="${cls.join(" ")}"><b>${dt.getDate()}일</b><span>${DOW[dt.getDay()]}${d.holiday ? " · " + esc(d.holiday) : ""}</span></div><div class="tl-items">${items.join("") || `<span class="pill line">${esc(d.holiday || "")}</span>`}</div></div>`;
     }).join("") + `</div>`;
@@ -574,13 +605,13 @@ function monthPage(m) {
           const f = it.story ? "story" : fmtOf(it.title);
           return `<button type="button" class="entry" data-m="${mi}:${si}:${ii}"><span class="fmt ${f}">${FMT[f]}</span>
             <span class="e-body"><span class="e-title">${esc(stripFmt(it.title.replace(/\n/g, " ")) || it.title)}</span>
-            ${it.fields["기획 의도"] ? `<span class="e-prev">${esc(it.fields["기획 의도"].replace(/\n+/g, " "))}</span>` : ""}</span>
+            ${(it.fields["기획 의도"] || it.fields["기획 의도 & 팔로워 예상 반응"]) ? `<span class="e-prev">${esc((it.fields["기획 의도"] || it.fields["기획 의도 & 팔로워 예상 반응"]).replace(/\n+/g, " "))}</span>` : ""}</span>
             <span class="check${it.done ? " on" : ""}" aria-label="${it.done ? "이행 완료" : "미이행"}">${it.done ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>` : ""}</span></button>`;
         }).join("")}</div>`;
     }).join("");
   }
   return `<div class="hero" style="--c:var(--accent)"><span class="swatch"></span><h2>${esc(m.name)} 콘텐츠 캘린더</h2>
-      <div class="full">${m.kind === "grid" ? "날짜별 스토리 · 피드 기획" : "카테고리별 기획 콘텐츠 · 체크는 시트의 ‘포인트 이행’"}</div></div>
+      <div class="full">${m.kind === "grid" ? "날짜별 스토리 · 피드 기획" : "기획 콘텐츠 목록 · 체크는 시트의 이행 체크박스"}</div></div>
     ${noteFolds(m.notes)}${body}`;
 }
 const monthPager = makePager($("#month-tabs"), $("#month-pager"), DATA.months, m => esc(m.name), monthPage, "monthIdx");
@@ -590,8 +621,9 @@ $("#month-pager").addEventListener("click", ev => {
   const m = DATA.months[+mi];
   if (m.kind === "grid") {
     const d = m.days[+a];
-    const fields = c === "s" ? d.fields.filter(x => x.label === "스토리") : d.fields.filter(x => x.label !== "스토리");
-    const t = c === "s" ? "스토리" : (d.fields.find(x => x.label === "주제")?.text.split("\n")[0] || "");
+    const {topics, stories} = dayGroups(d);
+    const fields = c[0] === "s" ? [stories[+c.slice(1)]] : topics[+c.slice(1)];
+    const t = c[0] === "s" ? storyTitle(fields[0].text) : topicTitle(fields[0].text);
     openSheet(`<span class="pill ghost">${esc(m.name)} ${parse(d.date).getDate()}일 ${DOW[parse(d.date).getDay()]}</span>${d.holiday ? `<span class="pill line">${esc(d.holiday)}</span>` : ""}`,
       stripFmt(t) || t, fields.map(f => fieldHTML(f.label, f.text)).join(""));
   } else {

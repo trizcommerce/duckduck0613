@@ -1,4 +1,4 @@
-"""덕덕님 콘텐츠 캘린더 앱 빌더.
+"""셀러 콘텐츠 캘린더 앱 빌더. (셀러별 설정은 config.json)
 
 구글 시트(공개 xlsx export)를 내려받아 캘린더/제품/월별 데이터를 JSON으로 정리한 뒤
 template.html 에 넣어 모바일용 단일 HTML(duckduck_calendar.html)을 만든다.
@@ -15,15 +15,17 @@ from pathlib import Path
 
 import openpyxl
 
-SHEET_ID = "1qb1TsBgDTvlX0qAFSXQfKi1uk1FTyyINzj1Tw2qriys"
-YEAR = 2026
 HERE = Path(__file__).parent
+CONFIG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+SHEET_ID = CONFIG["sheet_id"]
+YEAR = CONFIG.get("year", 2026)
 XLSX = HERE / "sheet.xlsx"
 TEMPLATE = HERE / "template.html"
 OUT = HERE / "duckduck_calendar.html"
 
 CAL_COLS = "BCDEFGH"  # 월~일
 MEETING_FILL = "FFCFE2F3"
+PALETTE = ["#A4C2F4", "#F9CB9C", "#B6D7A8", "#D9D2E9", "#FFE599", "#EA9999", "#A2C4C9", "#D5A6BD"]
 HOLIDAY_FILL = "FFF3F3F3"
 
 
@@ -70,23 +72,31 @@ def parse_calendar(ws, product_keys):
             legend[fill(g)] = text(h.value)
 
     merged = {(m.min_row, m.min_col): m for m in ws.merged_cells.ranges}
-    month, week_rows = None, []
+    month, week_rows, header_rows = None, [], set()
     for r in range(1, ws.max_row + 1):
         b = ws.cell(r, 2).value
-        if isinstance(b, (int, float)) and not isinstance(b, bool) and 1 <= b <= 12:
-            month = int(b)
+        month_label = text(ws.cell(r, 12).value)
+        if re.fullmatch(r"\d{1,2}월", month_label):
+            month = int(month_label[:-1])
+            header_rows.add(r)
             continue
         dates = {}
         for i, c in enumerate(CAL_COLS):
             v = ws[f"{c}{r}"].value
             if isinstance(v, dt.datetime) and v.year == YEAR:
                 dates[i] = v.day
+            elif isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer() and 1 <= v <= 31:
+                dates[i] = int(v)
+        if len(dates) == 1 and not any(isinstance(ws[f"{c}{r}"].value, dt.datetime) for c in CAL_COLS):
+            dates = {}  # 숫자 하나만 있는 행은 날짜 행으로 보지 않음
         if dates and month:
             week_rows.append((r, month, dates))
 
     for idx, (r, month, dates) in enumerate(week_rows):
         nxt = week_rows[idx + 1][0] if idx + 1 < len(week_rows) else ws.max_row + 1
         for rr in range(r + 1, min(nxt, r + 7)):
+            if rr in header_rows:
+                break
             for i, c in enumerate(CAL_COLS):
                 cell = ws[f"{c}{rr}"]
                 t = text(cell.value)
@@ -114,6 +124,7 @@ def parse_calendar(ws, product_keys):
 
 # ---------------------------------------------------------------- 제품 탭
 DATE_RE = re.compile(r"(\d{1,2})\s*/\s*(\d{1,2})")
+FORMAT_RE = re.compile(r"(스토리|릴스|게시글|게시물|캐러셀|피드|무물|라이브|라방)")
 
 
 def parse_period(s):
@@ -130,6 +141,13 @@ def split_topic(b):
     if not lines:
         return "", "", []
     fmt = lines[0]
+    m = re.match(r"\[(.+?)\]\s*(.*)", fmt)
+    if m:
+        fmt = m[1].strip()
+        if m[2].strip():
+            lines = [fmt, m[2].strip(), *lines[1:]]
+    if not FORMAT_RE.match(fmt):
+        return "기타", " ".join(lines), []
     if fmt.startswith("스토리"):
         rest = " ".join(l.lstrip("*").strip() for l in lines[1:])
         return "스토리", "", [rest] if rest else []
@@ -177,7 +195,7 @@ def parse_product(ws, colors):
             if m.min_col == 2:
                 b_merge[r] = m.min_row
 
-    slots, cur = [], None
+    slots, cur, last_a = [], None, ""
     for r in range(header_row + 1, ws.max_row + 1):
         a = text(ws.cell(a_merge.get(r, r), 1).value)
         b = text(ws.cell(b_merge.get(r, r), 2).value)
@@ -191,7 +209,8 @@ def parse_product(ws, colors):
         new_a = a and (r not in a_merge or a_merge[r] == r)
         new_b = b and (r not in b_merge or b_merge[r] == r)
         if cur is None or new_a or new_b:
-            a = a or (cur or {}).get("label", "")
+            a = a or last_a
+            last_a = a
             m = DATE_RE.search(a)
             fmt, title, notes = split_topic(b)
             cur = {
@@ -214,7 +233,9 @@ def parse_product(ws, colors):
 
     name = ws.title.strip()
     base = norm(name)
-    color = next((c for n, c in colors.items() if norm(n) == base), "#9aa4b2")
+    color = next((c for n, c in colors.items() if norm(n) == base), None)
+    if color is None:
+        color = PALETTE[sum(map(ord, base)) % len(PALETTE)]
     round_m = re.search(r"(\d)차", name)
     return {
         "id": "p" + re.sub(r"\W", "", base) + (round_m[1] if round_m else ""),
@@ -229,7 +250,8 @@ def parse_product(ws, colors):
 
 
 # ---------------------------------------------------------------- 월별 탭
-GRID_LABELS = {"스토리", "주제", "기획 의도", "팔로워 반응", "콘텐츠 구성", "콘텐츠 플로우", "캡션 참고"}
+GRID_LABELS = {"스토리", "주제", "기획 의도", "팔로워 반응", "콘텐츠 구성", "콘텐츠 플로우", "캡션 참고",
+               "콘텐츠", "기대 효과", "기획 의도 & 기대 효과", "팔로워 예상 반응", "피드 비주얼", "피드 참고"}
 DAY_RE = re.compile(r"^(\d{1,2})(?:\.0)?(?:\s*\((.+)\))?$")
 
 
@@ -338,11 +360,54 @@ def parse_month_sections(ws):
     return {"kind": "sections", "notes": notes, "sections": sections}
 
 
+def parse_month_weeks(ws):
+    """주차별 섹션: 'n주차 콘텐츠' 제목 → '유형' 헤더 → 항목 행 + 이어지는 보조 행"""
+    skip = top_left_only(ws)
+
+    def val(r, c):
+        return "" if (r, c) in skip else text(ws.cell(r, c).value)
+
+    notes, sections, headers, item = [], [], {}, None
+    for r in range(1, ws.max_row + 1):
+        a = val(r, 1)
+        row = {c: val(r, c) for c in range(2, ws.max_column + 1)}
+        if "주차" in a:
+            title, _, rng = a.partition("(")
+            sections.append({"title": title.replace("콘텐츠", "").strip(),
+                             "sub": rng.rstrip(")").strip(), "items": []})
+            item = None
+            continue
+        if a == "유형":
+            headers = {c: v for c, v in row.items() if v}
+            continue
+        if not sections:
+            notes += [v for v in [a, *row.values()] if len(v) > 40]
+            continue
+        done = any(ws.cell(r, c).value is True for c in range(2, ws.max_column + 1))
+        if a:
+            fields = {headers[c]: v for c, v in row.items() if v and c in headers}
+            topic = fields.pop(headers.get(2, ""), "")
+            item = {"done": done, "title": f"[{a}] {topic}".strip(), "fields": fields}
+            sections[-1]["items"].append(item)
+        elif item:
+            for c, v in row.items():
+                if not v or c not in headers:
+                    continue
+                if "팔로워" in headers[c] and headers[c] == headers.get(3):
+                    item["reaction"] = (item.get("reaction", "") + "\n" + v).strip()
+                else:
+                    k = headers[c]
+                    item["fields"][k] = (item["fields"].get(k, "") + "\n\n" + v).strip()
+    return {"kind": "sections", "notes": notes, "sections": sections}
+
+
 def parse_month(ws):
     m = re.match(r"(\d{2})\.(\d{2})", ws.title.strip())
     month = int(m[2])
     has_grid = any(text(ws.cell(r, 1).value) == "날짜" for r in range(1, 10))
-    data = parse_month_grid(ws, month) if has_grid else parse_month_sections(ws)
+    has_weeks = any(text(ws.cell(r, 1).value) == "유형" for r in range(1, ws.max_row + 1))
+    data = (parse_month_grid(ws, month) if has_grid
+            else parse_month_weeks(ws) if has_weeks else parse_month_sections(ws))
     data.update({"id": f"m{month:02d}", "month": month, "name": f"{month}월"})
     return data
 
@@ -381,6 +446,7 @@ def main():
     if TEMPLATE.exists():
         html = TEMPLATE.read_text(encoding="utf-8")
         payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+        html = html.replace("__APP_NAME__", CONFIG["app_name"]).replace("__SELLER__", CONFIG["seller"])
         OUT.write_text(html.replace("/*__DATA__*/null", payload), encoding="utf-8")
         print("built", OUT)
     print(f"events={len(events)} products={len(products)} months={len(months)}")
