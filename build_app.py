@@ -34,6 +34,54 @@ PALETTE = ["#A4C2F4", "#F9CB9C", "#B6D7A8", "#D9D2E9", "#FFE599", "#EA9999", "#A
 HOLIDAY_FILL = "FFF3F3F3"
 
 
+TABS_DIR = HERE / "tabs"  # 탭별로 받은 xlsx (config "per_tab": true)
+
+
+def fetch(url, dest, tries=4):
+    """파일 받기 — 중간에 끊기면 다시 시도, 덜 받은 xlsx 는 걸러냄"""
+    import time
+    import zipfile
+    for i in range(1, tries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=600) as r:
+                dest.write_bytes(r.read())
+            zipfile.ZipFile(dest).testzip()
+            return
+        except Exception as e:
+            print(f"download try {i} failed: {e}")
+            if i == tries:
+                raise
+            time.sleep(20 * i)
+
+
+def load_tabs(local):
+    """탭별로 받아 [(워크북, 파일)] — 시트 순서대로 받다가 올해 이전 공구 탭이 3개 연속이면 멈춤
+    (한 번에 받기엔 너무 큰 시트용)"""
+    TABS_DIR.mkdir(exist_ok=True)
+    out, old = [], 0
+    for name, gid in sheet_media.list_tabs(SHEET_ID):
+        f = TABS_DIR / f"{gid}.xlsx"
+        if not (local and f.exists()):
+            fetch(f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx&gid={gid}", f)
+        wb = openpyxl.load_workbook(f, data_only=True, rich_text=True)
+        ws = wb.worksheets[0]
+        if find_header(ws):
+            p = parse_product(ws, {})
+            dates = [s["date"] for s in p["slots"] if s["date"]] + (p["period"] or [])
+            if dates and max(dates) < f"{YEAR}-01-01":
+                old += 1
+                if old >= 3:
+                    break
+                continue
+            old = 0
+        out.append((wb, f))
+    keep = {f.name for _, f in out}
+    for f in TABS_DIR.glob("*.xlsx"):  # 이번에 안 쓴 예전 탭 파일 정리
+        if f.name not in keep and f.stat().st_mtime < __import__("time").time() - 86400:
+            f.unlink()
+    return out
+
+
 def download(tries=4):
     """시트 xlsx 받기 — 파일이 커서 중간에 끊기면 다시 시도"""
     import time
@@ -115,7 +163,20 @@ def parse_calendar(ws, product_keys):
 
     merged = {(m.min_row, m.min_col): m for m in ws.merged_cells.ranges}
     month, week_rows, header_rows, cur_year = None, [], set(), None
+    block_year, prev_month, direction = YEAR, None, 0
     for r in range(1, ws.max_row + 1):
+        sched = re.fullmatch(r"(\d{1,2})월\s*스케줄", text(ws.cell(r, 2).value))
+        if sched:  # "10월 스케줄", "9월 스케줄" … 처럼 월별 작은 달력이 이어진 탭
+            m_ = int(sched[1])
+            if prev_month is not None and m_ != prev_month:
+                direction = direction or (1 if m_ > prev_month else -1)
+                if direction < 0 and m_ > prev_month:
+                    block_year -= 1
+                if direction > 0 and m_ < prev_month:
+                    block_year += 1
+            month, prev_month = m_, m_
+            header_rows.add(r)
+            continue
         years = {v.year for v in (ws.cell(r, c).value for c in range(2, 19)) if isinstance(v, dt.datetime)}
         if years:
             cur_year = max(years)
@@ -133,12 +194,13 @@ def parse_calendar(ws, product_keys):
             elif (isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer() and 1 <= v <= 31
                   and cur_year in (None, YEAR)):
                 dates[i] = int(v)
-        if len(dates) == 1 and not any(isinstance(ws[f"{c}{r}"].value, dt.datetime) for c in CAL_COLS):
-            dates = {}  # 숫자 하나만 있는 행은 날짜 행으로 보지 않음
+        if (len(dates) == 1 and not any(isinstance(ws[f"{c}{r}"].value, dt.datetime) for c in CAL_COLS)
+                and not (prev_month and list(dates.values()) == [1])):
+            dates = {}  # 숫자 하나만 있는 행은 날짜 행으로 보지 않음 (스케줄형 달력의 1일은 예외)
         if dates and month:
-            week_rows.append((r, month, dates))
+            week_rows.append((r, month, dates, block_year if prev_month else YEAR))
 
-    for idx, (r, month, dates) in enumerate(week_rows):
+    for idx, (r, month, dates, year) in enumerate(week_rows):
         nxt = week_rows[idx + 1][0] if idx + 1 < len(week_rows) else ws.max_row + 1
         for rr in range(r + 1, min(nxt, r + 7)):
             if rr in header_rows:
@@ -149,7 +211,9 @@ def parse_calendar(ws, product_keys):
                 if not t or isinstance(cell.value, dt.datetime) or i not in dates:
                     continue
                 # 셀에 적힌 날짜가 월 헤더와 다른 경우(5월 블록 오류)도 월 헤더 기준으로 보정
-                start = dt.date(YEAR, month, dates[i])
+                if not _valid(year, month, dates[i]):
+                    continue
+                start = dt.date(year, month, dates[i])
                 span = 1
                 m = merged.get((rr, cell.column))
                 if m:
@@ -173,21 +237,51 @@ DATE_RE = re.compile(r"(\d{1,2})\s*/\s*(\d{1,2})")
 FORMAT_RE = re.compile(r"(스토리|릴스|게시글|게시물|캐러셀|피드|무물|라이브|라방)")
 
 
+WEEKDAYS = "월화수목금토일"
+WD_RE = re.compile(r"(\d{1,2})\s*(?:/|월)\s*(\d{1,2})\s*일?\s*\(?\s*([월화수목금토일])")
+
+
+def by_weekday(mo, d, wd):
+    """적힌 요일과 맞는 해 (config 기본 연도에 가장 가까운 해) — 연도 없는 옛 탭용"""
+    years = [y for y in range(YEAR + 1, YEAR - 6, -1) if _valid(y, mo, d) and dt.date(y, mo, d).weekday() == WEEKDAYS.index(wd)]
+    return dt.date(min(years, key=lambda y: (abs(y - YEAR), -y)), mo, d) if years else None
+
+
+def _valid(y, mo, d):
+    try:
+        dt.date(y, mo, d)
+        return True
+    except ValueError:
+        return False
+
+
 def dater(tab_name):
-    """탭 이름이 'YY.MM…' 이면 그 연월에 가장 가까운 해로, 아니면 기본 연도로 (월, 일) → date"""
+    """탭 이름이 'YY.MM…' 이면 그 연월에 가장 가까운 해로, 아니면 기본 연도로 (월, 일[, 요일]) → date"""
     m = re.match(r"\s*(\d{2})\.(\d{1,2})(?!\d)", tab_name)
+    weekday_mode = CONFIG.get("infer_year") == "weekday"
     if not m:
-        return lambda mo, d: dt.date(YEAR, mo, d)
+        def make(mo, d, wd=None):
+            if weekday_mode and wd:
+                return by_weekday(mo, d, wd) or dt.date(YEAR, mo, d)
+            return dt.date(YEAR, mo, d)
+        return make
     ty, tm = 2000 + int(m[1]), int(m[2])
 
-    def make(mo, d):
+    def make(mo, d, wd=None):
         anchor = dt.date(ty, tm, 1)
         return min((dt.date(y, mo, d) for y in (ty - 1, ty, ty + 1)), key=lambda x: abs((x - anchor).days))
     return make
 
 
 def parse_period(s, date_of=None):
-    date_of = date_of or (lambda mo, d: dt.date(YEAR, mo, d))
+    date_of = date_of or (lambda mo, d, wd=None: dt.date(YEAR, mo, d))
+    if CONFIG.get("infer_year") == "weekday":
+        w = re.search(r"(\d{1,2})\s*(?:/|월)\s*(\d{1,2})\s*일?\s*\(\s*([월화수목금토일])[^)]*\)\s*~\s*"
+                      r"(\d{1,2})\s*(?:/|월)\s*(\d{1,2})", s)
+        if w:
+            a = date_of(int(w[1]), int(w[2]), w[3])
+            b = dt.date(a.year + (int(w[4]) < int(w[1])), int(w[4]), int(w[5]))
+            return [iso(a), iso(b)]
     m = re.search(r"(\d{1,2})/(\d{1,2})\s*\([^)]*\)\s*~\s*(\d{1,2})/(\d{1,2})", s)
     if not m:
         m = re.search(r"\d{2}\.(\d{2})\.(\d{2})\s*~\s*\d{2}\.(\d{2})\.(\d{2})", s)
@@ -236,11 +330,15 @@ def find_header(ws):
 
 def slot_label(a):
     """'D-12\n9/26(토)' → 'D-12', '9/29 오픈 (화)' → 'OPEN', 날짜뿐이면 ''"""
-    m = re.search(r"D\s*[-+]\s*\d+|OPEN|오픈|마감", a, re.I)
+    m = re.search(r"D\s*[-+]\s*\d+", a, re.I)
     if m:
-        if m[0] == "마감":
-            return "마감"
-        return "OPEN" if m[0] in ("오픈",) or m[0].upper() == "OPEN" else re.sub(r"\s+", "", m[0]).upper()
+        return re.sub(r"\s+", "", m[0]).upper()
+    m = re.search(r"OPEN|오픈(?!\s*[전후])|마감", a, re.I)
+    if m:
+        return "마감" if m[0] == "마감" else "OPEN"
+    m = re.match(r"\s*오픈\s*([전후])", a)
+    if m:
+        return f"오픈 {m[1]}"
     first = a.split("\n")[0].split(" ")[0].strip()
     return "" if DATE_RE.match(first) else first
 
@@ -355,7 +453,7 @@ def parse_product(ws, colors):
                 fmt, title, notes = split_topic(b)
             cur = {
                 "label": slot_label(a),
-                "date": iso(date_of(int(m[1]), int(m[2]))) if m else None,
+                "date": iso(date_of(int(m[1]), int(m[2]), (WD_RE.search(a) or [None] * 4)[3])) if m else None,
                 "format": fmt or "기타",
                 "title": title,
                 "notes": notes,
@@ -409,6 +507,14 @@ def parse_product(ws, colors):
             sl["title"] = line[:40] or ("참고 링크" if any(ln.startswith("http") for ln in lines) else "")
     if period is None:
         period = next((pp for pp in (parse_period(t, date_of) for t in top_lines) if pp), None)
+    if period:
+        open_day = dt.date.fromisoformat(period[0])
+        for sl in slots:
+            if sl["date"]:
+                continue
+            off = 0 if sl["label"] == "OPEN" else int(sl["label"][1:]) if re.fullmatch(r"D[-+]\d+", sl["label"]) else None
+            if off is not None:
+                sl["date"] = iso(open_day + dt.timedelta(days=off))
     if period is None:  # 기간 표기가 없으면 OPEN ~ 마지막 D+ 날짜
         opens = [sl["date"] for sl in slots if sl["label"] == "OPEN" and sl["date"]]
         if opens:
@@ -420,13 +526,13 @@ def parse_product(ws, colors):
     color = next((c for n, c in colors.items() if norm(n) == base), None)
     if color is None:
         color = PALETTE[sum(map(ord, base)) % len(PALETTE)]
-    round_m = re.search(r"(\d)차", name)
+    round_m = re.search(r"(\d+)차", name)
     seller = CONFIG["seller"].removesuffix("님")
     display = re.sub(r"^\d{2}\.\d{1,2}[\s_]*", "", name)             # "26.09 방탄커피" → "방탄커피"
     display = re.sub(rf"^{re.escape(seller)}\s*[xX×]\s*", "", display)  # "방효선x헤어 2종" → "헤어 2종"
     return {
         "id": "p" + re.sub(r"\W", "", base) + (round_m[1] if round_m else ""),
-        "name": re.sub(r"\s*\(?\d차\)?", "", display).strip(),
+        "name": re.sub(r"\s*\(?\d+차\)?", "", display).strip(),
         "round": f"{round_m[1]}차" if round_m else "",
         "fullName": product_line,
         "color": color,
@@ -616,20 +722,26 @@ def parse_month(ws):
 
 # ---------------------------------------------------------------- main
 def main():
-    if "--local" not in sys.argv:
-        download()
-    wb = openpyxl.load_workbook(XLSX, data_only=True, rich_text=True)
+    local = "--local" in sys.argv
+    if CONFIG.get("per_tab"):
+        books = load_tabs(local)
+    else:
+        if not local:
+            download()
+        books = [(openpyxl.load_workbook(XLSX, data_only=True, rich_text=True), XLSX)]
     try:
         links = sheet_media.fetch_links(SHEET_ID)
     except Exception as e:  # 시트 HTML 보기를 못 읽으면 xlsx 의 셀 링크만 사용
         print("links: htmlview 실패, xlsx 링크로 대체 -", e)
         links = {}
-    FORMATS.update(sheet_media.collect_formats(wb, links))
-    visible = {ws.title.strip() for ws in wb.worksheets if ws.sheet_state == "visible"}
-    IMAGES.update(sheet_media.extract_images(XLSX, MEDIA, only=visible))
-    print("images:", sum(len(v) for cells in IMAGES.values() for v in cells.values()))
-    sheets = [ws for ws in wb.worksheets if ws.sheet_state == "visible"]
-    cal = next((ws for ws in sheets if "캘린더" in ws.title), None)
+    sheets = []
+    for wb, path in books:
+        FORMATS.update(sheet_media.collect_formats(wb, links))
+        visible = {ws.title.strip() for ws in wb.worksheets if ws.sheet_state == "visible"}
+        IMAGES.update(sheet_media.extract_images(path, MEDIA, only=visible))
+        sheets += [ws for ws in wb.worksheets if ws.sheet_state == "visible"]
+    print("tabs:", len(sheets), "images:", sum(len(v) for cells in IMAGES.values() for v in cells.values()))
+    cal = next((ws for ws in sheets if "캘린더" in ws.title or "스케줄" in ws.title), None)
     product_sheets = [ws for ws in sheets if ws is not cal and find_header(ws)]
     month_sheets = [ws for ws in sheets if ws not in product_sheets and re.match(r"\d{2}\.\d{2}", ws.title.strip())]
     events, colors = parse_calendar(cal, {norm(ws.title) for ws in product_sheets}) if cal else ([], {})
@@ -639,13 +751,19 @@ def main():
         if not p["round"] and tab_ym and sum(q["name"] == p["name"] for q in products) > 1:
             p["round"] = tab_ym[1]
     months = [parse_month(ws) for ws in month_sheets]
+    for e in events:  # 범례 색이 없으면 "제품명 + N차" 가 적힌 칸을 그 제품으로
+        if not e["product"]:
+            hit = next((p for p in products if p["round"] and norm(p["name"]) in norm(e["text"])
+                        and p["round"] in e["text"].replace(" ", "")), None)
+            if hit:
+                e["product"], e["_id"] = hit["name"], hit["id"]
     for e in events:  # 범례 이름 → 제품 탭 id (같은 제품 여러 차수면 날짜가 가까운 차수)
         cands = [p for p in products if e["product"] and norm(p["name"]) == norm(e["product"])]
 
         def dist(p):
             ds = [s["date"] for s in p["slots"] if s["date"]] + (p["period"] or [])
             return min(abs((dt.date.fromisoformat(d) - dt.date.fromisoformat(e["date"])).days) for d in ds)
-        e["product"] = min(cands, key=dist)["id"] if cands else None
+        e["product"] = e.pop("_id", None) or (min(cands, key=dist)["id"] if cands else None)
     products.sort(key=lambda p: (p["period"] or [max((s["date"] for s in p["slots"] if s["date"]), default="0000")])[0],
                   reverse=True)
     months.sort(key=lambda m: m["month"], reverse=True)

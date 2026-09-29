@@ -93,15 +93,20 @@ class _SheetTable(HTMLParser):
             self.anchor[1] += data
 
 
+def list_tabs(sheet_id):
+    """시트의 보이는 탭 [(이름, gid)] (시트에 보이는 순서)"""
+    page = _get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/htmlview")
+    items = re.findall(r'items\.push\(\{name: "((?:[^"\\]|\\.)*)", pageUrl: "[^"]*", gid: "(\d+)"', page)
+    return [(raw.encode().decode("unicode_escape").encode("latin-1").decode("utf-8").replace("\\/", "/"), gid)
+            for raw, gid in items]
+
+
 def fetch_links(sheet_id):
     """{시트 이름: {(행, 열): [(문구, 주소)]}} — 실패하면 빈 dict"""
     base = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-    page = _get(f"{base}/htmlview")
-    items = re.findall(r'items\.push\(\{name: "((?:[^"\\]|\\.)*)", pageUrl: "[^"]*", gid: "(\d+)"', page)
     out = {}
-    for raw_name, gid in items:
-        name = raw_name.encode().decode("unicode_escape").encode("latin-1").decode("utf-8")
-        name = name.strip().strip("[]").strip()
+    for raw_name, gid in list_tabs(sheet_id):
+        name = raw_name.strip().strip("[]").strip()
         t = _SheetTable()
         t.feed(_get(f"{base}/htmlview/sheet?headers=true&gid={gid}"))
         out[name] = t.links

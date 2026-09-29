@@ -353,7 +353,7 @@ DATA.events.forEach(ev => {
     const hit = DATA.products.find(p => p.slots.some(s => s.title && similar(s.title, ev.text)));
     if (hit) ev.product = hit.id;
   }
-  push(k, {src: "event", ev, pid: ev.product, fmt: isStory ? "story" : fmtOf(ev.text) === "etc" ? (ev.product ? "reel" : "meeting") : fmtOf(ev.text),
+  push(k, {src: "event", ev, pid: ev.product, fmt: isStory ? "story" : fmtOf(ev.text) === "etc" ? (ev.product && !/진행|기획전/.test(ev.text) ? "reel" : "meeting") : fmtOf(ev.text),
     title: isStory ? `${P[ev.product]?.name || ""} 스토리`.trim() : ev.text.replace(/\n/g, " "), sort: isStory ? 2 : 1});
 });
 
