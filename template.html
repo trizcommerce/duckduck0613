@@ -254,7 +254,7 @@ details.fold[open] summary::after{transform:rotate(-135deg);margin-top:4px}
 const DATA = /*__DATA__*/null;
 const $ = s => document.querySelector(s);
 const DOW = ["일","월","화","수","목","금","토"];
-const FMT = {reel:"릴스", post:"피드", story:"스토리", qa:"무물", live:"라방", ad:"광고", meeting:"일정", free:"자율", etc:"기타"};
+const FMT = {reel:"릴스", post:"피드", story:"스토리", qa:"무물", live:"라방", ad:"광고", meeting:"일정", free:"자유", etc:"기타"};
 const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 
 const LINK = /⟦([^|⟧]*)\|([^⟧]*)⟧/g;  // 시트 링크: ⟦문구|주소⟧
@@ -314,7 +314,7 @@ function fmtOf(s) {
   if (/캐러셀|게시글|게시물|피드/.test(s)) return "post";
   if (/무물/.test(s)) return "qa";
   if (/라이브|라방/.test(s)) return "live";
-  if (/자율/.test(s)) return "free";
+  if (/자율|자유|일상/.test(s)) return "free";
   if (/스토리/.test(s)) return "story";
   return "etc";
 }
@@ -640,7 +640,7 @@ function productPage(p) {
     if (last && last.label === s.label && last.date === s.date) last.slots.push([s, si]);
     else byDay.push({label: s.label, date: s.date, slots: [[s, si]]});
   });
-  const reels = p.slots.filter(s => fmtOf(s.format) !== "story").length;
+  const reels = p.slots.filter(s => ["reel", "post"].includes(fmtOf(s.format))).length;
   const stories = p.slots.filter(s => fmtOf(s.format) === "story").reduce((n, s) => n + Math.max(1, s.items.length), 0);
   const tl = byDay.map(g => {
     const d = g.date ? parse(g.date) : null;

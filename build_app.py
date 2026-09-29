@@ -173,14 +173,28 @@ DATE_RE = re.compile(r"(\d{1,2})\s*/\s*(\d{1,2})")
 FORMAT_RE = re.compile(r"(스토리|릴스|게시글|게시물|캐러셀|피드|무물|라이브|라방)")
 
 
-def parse_period(s):
+def dater(tab_name):
+    """탭 이름이 'YY.MM…' 이면 그 연월에 가장 가까운 해로, 아니면 기본 연도로 (월, 일) → date"""
+    m = re.match(r"\s*(\d{2})\.(\d{1,2})(?!\d)", tab_name)
+    if not m:
+        return lambda mo, d: dt.date(YEAR, mo, d)
+    ty, tm = 2000 + int(m[1]), int(m[2])
+
+    def make(mo, d):
+        anchor = dt.date(ty, tm, 1)
+        return min((dt.date(y, mo, d) for y in (ty - 1, ty, ty + 1)), key=lambda x: abs((x - anchor).days))
+    return make
+
+
+def parse_period(s, date_of=None):
+    date_of = date_of or (lambda mo, d: dt.date(YEAR, mo, d))
     m = re.search(r"(\d{1,2})/(\d{1,2})\s*\([^)]*\)\s*~\s*(\d{1,2})/(\d{1,2})", s)
     if not m:
         m = re.search(r"\d{2}\.(\d{2})\.(\d{2})\s*~\s*\d{2}\.(\d{2})\.(\d{2})", s)
     if not m:
         return None
-    a = dt.date(YEAR, int(m[1]), int(m[2]))
-    b = dt.date(YEAR, int(m[3]), int(m[4]))
+    a = date_of(int(m[1]), int(m[2]))
+    b = date_of(int(m[3]), int(m[4]))
     return [iso(a), iso(b)]
 
 
@@ -213,13 +227,19 @@ def find_header(ws):
         for c in (1, 2):
             if text(ws.cell(r, c).value) in DATE_HEADERS:
                 return r, c
+    for r in range(1, 16):  # 날짜 칸 제목이 비어 있는 표: '피드 주제' 두 칸 왼쪽이 날짜
+        for c in (3, 4):
+            if text(ws.cell(r, c).value) == "피드 주제":
+                return r, c - 2
     return None
 
 
 def slot_label(a):
     """'D-12\n9/26(토)' → 'D-12', '9/29 오픈 (화)' → 'OPEN', 날짜뿐이면 ''"""
-    m = re.search(r"D\s*[-+]\s*\d+|OPEN|오픈", a, re.I)
+    m = re.search(r"D\s*[-+]\s*\d+|OPEN|오픈|마감", a, re.I)
     if m:
+        if m[0] == "마감":
+            return "마감"
         return "OPEN" if m[0] in ("오픈",) or m[0].upper() == "OPEN" else re.sub(r"\s+", "", m[0]).upper()
     first = a.split("\n")[0].split(" ")[0].strip()
     return "" if DATE_RE.match(first) else first
@@ -254,7 +274,9 @@ def parse_product(ws, colors):
 
     header_row, date_col = find_header(ws)
     head = {c: val(header_row, c) for c in range(date_col, ws.max_column + 1) if val(header_row, c)}
+    head.setdefault(date_col, "업로드 일자")  # 날짜 칸 제목이 비어 있으면 업로드 일자형으로
     upload_style = head[date_col] == "업로드 일자"
+    date_of = dater(ws.title)
     if upload_style:  # 업로드 일자 | 촬영 기한 | 콘텐츠 유형 | 콘텐츠 주제 | …
         kind_col = next((c for c, h in head.items() if "유형" in h), None)
         title_col = next((c for c, h in head.items() if "주제" in h), None)
@@ -272,7 +294,7 @@ def parse_product(ws, colors):
         if not t:
             continue
         if "📍" not in t and "\n" not in t:  # 업로드 일자형: "방효선 X 쑥세럼&크림 8/26(수) ~ 8/30(일)"
-            period = period or parse_period(t)
+            period = period or parse_period(t, date_of)
             if len(t.strip()) > 4:
                 info.append({"label": "공구", "text": shown(ws, r, c0, t)})
             continue
@@ -281,7 +303,7 @@ def parse_product(ws, colors):
             head_line, _, body = block.partition("\n")
             head_line = head_line.replace("📍", "").strip()
             if "공구일정" in head_line:
-                period = parse_period(head_line)
+                period = parse_period(head_line, date_of)
             if "공구상품" in head_line:
                 product_line = head_line.split(":", 1)[-1].strip()
             if ":" in head_line and not body:
@@ -333,12 +355,14 @@ def parse_product(ws, colors):
                 fmt, title, notes = split_topic(b)
             cur = {
                 "label": slot_label(a),
-                "date": iso(dt.date(YEAR, int(m[1]), int(m[2]))) if m else None,
+                "date": iso(date_of(int(m[1]), int(m[2]))) if m else None,
                 "format": fmt or "기타",
                 "title": title,
                 "notes": notes,
                 "items": [],
             }
+            if upload_style and not cur["label"] and re.fullmatch(r"(D\s*[-+]\s*\d+|OPEN|오픈|마감)(\s*피드)?", title, re.I):
+                cur["label"] = slot_label(title)  # 제목 칸에 적힌 D-1 / OPEN / 마감
             slots.append(cur)
         if fields:
             if cur["format"].startswith("스토리") or not cur["items"]:
@@ -352,6 +376,29 @@ def parse_product(ws, colors):
                 cur["items"].append({})
             cur["items"][-1].setdefault("__images", []).extend(imgs)
 
+    def plain_of(v):
+        return re.sub(r"⟪[^⟫]*⟫|⟦([^|⟧]*)\|[^⟧]*⟧", lambda x: x.group(1) or "", v)
+
+    for sl in slots:
+        if not upload_style:
+            break
+        fields = [(k, plain_of(v).strip()) for it in sl["items"] for k, v in it.items() if k != "__images"]
+        if sl["format"] == "기타":  # 형식 칸이 없으면 내용 앞 표시로 (★피드, [스토리] …)
+            head = next((v for k, v in fields if "가이드" in k or "내용" in k), "")
+            if re.match(r"[★\[]\s*스토리", head) or sl["title"] in ("[스토리]", "스토리"):
+                sl["format"] = "스토리"
+                if sl["title"] in ("[스토리]", "스토리"):
+                    sl["title"] = ""
+            elif re.match(r"[★\[]\s*(자유\s*)?일상", head):
+                sl["format"] = "자유일상"
+            elif re.match(r"[★\[]\s*피드", head) or re.search(r"(^|\s)피드$", sl["title"]):
+                sl["format"] = "피드"
+        if re.fullmatch(r"(D\s*[-+]\s*\d+|OPEN|오픈|마감)(\s*피드)?", sl["title"], re.I):
+            # 제목 칸에 D-1 / OPEN / 마감만 있으면 피드글 첫 줄을 제목으로
+            cap = next((v for k, v in fields if "피드글 최종" in k), "") or next((v for k, v in fields if "피드글" in k), "")
+            line = next((ln.strip() for ln in cap.split("\n") if ln.strip() and not ln.strip().startswith("*")), "")
+            if line:
+                sl["title"] = line[:40]
     for sl in slots:  # 제목이 비어 있으면 내용 첫 줄로 (예: "✨방학!!!!✨"), 주소·날짜 칸은 제외
         if not sl["title"] and sl["format"] not in ("스토리",) and upload_style:
             lines = [ln.strip() for it in sl["items"] for k, v in it.items() if k != "__images" and "기한" not in k
@@ -361,11 +408,11 @@ def parse_product(ws, colors):
             line = next((ln for ln in lines if ln and not ln.startswith("http") and not DATE_RE.fullmatch(ln)), "")
             sl["title"] = line[:40] or ("참고 링크" if any(ln.startswith("http") for ln in lines) else "")
     if period is None:
-        period = next((pp for pp in map(parse_period, top_lines) if pp), None)
+        period = next((pp for pp in (parse_period(t, date_of) for t in top_lines) if pp), None)
     if period is None:  # 기간 표기가 없으면 OPEN ~ 마지막 D+ 날짜
         opens = [sl["date"] for sl in slots if sl["label"] == "OPEN" and sl["date"]]
         if opens:
-            after = [sl["date"] for sl in slots if sl["label"].startswith("D+") and sl["date"]]
+            after = [sl["date"] for sl in slots if (sl["label"].startswith("D+") or sl["label"] == "마감") and sl["date"]]
             period = [opens[0], max(after + opens)]
 
     name = ws.title.strip()
@@ -582,11 +629,15 @@ def main():
     IMAGES.update(sheet_media.extract_images(XLSX, MEDIA, only=visible))
     print("images:", sum(len(v) for cells in IMAGES.values() for v in cells.values()))
     sheets = [ws for ws in wb.worksheets if ws.sheet_state == "visible"]
-    cal = next(ws for ws in sheets if "캘린더" in ws.title)
+    cal = next((ws for ws in sheets if "캘린더" in ws.title), None)
     product_sheets = [ws for ws in sheets if ws is not cal and find_header(ws)]
     month_sheets = [ws for ws in sheets if ws not in product_sheets and re.match(r"\d{2}\.\d{2}", ws.title.strip())]
-    events, colors = parse_calendar(cal, {norm(ws.title) for ws in product_sheets})
+    events, colors = parse_calendar(cal, {norm(ws.title) for ws in product_sheets}) if cal else ([], {})
     products = [parse_product(ws, colors) for ws in product_sheets]
+    for p, ws in zip(products, product_sheets):  # 이름이 같은 제품(차수 표기 없음)은 탭의 연월로 구분
+        tab_ym = re.match(r"\s*(\d{2}\.\d{1,2})(?!\d)", ws.title)
+        if not p["round"] and tab_ym and sum(q["name"] == p["name"] for q in products) > 1:
+            p["round"] = tab_ym[1]
     months = [parse_month(ws) for ws in month_sheets]
     for e in events:  # 범례 이름 → 제품 탭 id (같은 제품 여러 차수면 날짜가 가까운 차수)
         cands = [p for p in products if e["product"] and norm(p["name"]) == norm(e["product"])]
