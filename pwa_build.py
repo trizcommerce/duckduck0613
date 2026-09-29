@@ -8,6 +8,7 @@ Netlify / GitHub Pages 등 정적 호스팅에 pwa/ 폴더를 그대로 올리�
 import datetime as dt
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -92,6 +93,12 @@ def main():
     html = SRC.read_text(encoding="utf-8")
     html = html.replace("<title>", HEAD + "<title>", 1) + REGISTER
     (PWA / "index.html").write_text(html, encoding="utf-8")
+    # 앱 데이터가 가리키는 시트 이미지만 복사
+    used = set(re.findall(r"media/([0-9a-f]{16}\.jpg)", DATA.read_text(encoding="utf-8")))
+    if used:
+        (PWA / "media").mkdir()
+        for name in used:
+            shutil.copy(HERE / "media" / name, PWA / "media" / name)
     for n in (180, 192, 512):
         saved = ICONS / f"icon-{n}.png"
         if saved.exists():

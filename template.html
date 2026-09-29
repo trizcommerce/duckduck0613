@@ -167,6 +167,21 @@ details.fold[open] summary::after{transform:rotate(-135deg);margin-top:4px}
 .cut{margin-top:14px;padding:12px 14px;border-radius:14px;background:var(--surface-2)}
 .cut .lb{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px}
 .foot{margin-top:28px;font-size:12px;color:var(--muted);text-align:center}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px;padding:12px 0}
+.gallery .lb{grid-column:1/-1;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--accent)}
+.gallery button{display:block;aspect-ratio:1;border-radius:10px;overflow:hidden;background:var(--surface-2);max-width:100%}
+.gallery img{width:100%;height:100%;object-fit:cover;display:block}
+.hero .gallery{padding-bottom:0}
+.tx a.ref{display:inline-flex;align-items:center;gap:3px;font-weight:600;text-decoration:none;border-bottom:1.5px solid color-mix(in srgb,var(--accent) 45%,transparent)}
+.tx a.ref::after{content:"↗";font-size:.85em}
+.viewer{position:fixed;inset:0;z-index:60;background:rgba(8,10,8,.94);display:flex;flex-direction:column}
+.viewer[hidden]{display:none!important}
+.viewer .bar{display:flex;justify-content:space-between;align-items:center;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 10px;color:#fff;font-size:14px;font-variant-numeric:tabular-nums}
+.viewer .bar button{color:#fff;width:40px;height:40px;display:grid;place-items:center;border-radius:12px}
+.viewer .stage{flex:1;min-height:0;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none}
+.viewer .stage::-webkit-scrollbar{display:none}
+.viewer .stage div{flex:0 0 100%;scroll-snap-align:center;display:grid;place-items:center;padding:0 8px calc(16px + env(safe-area-inset-bottom,0px))}
+.viewer .stage img{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
 </style>
 
@@ -213,6 +228,10 @@ details.fold[open] summary::after{transform:rotate(-135deg);margin-top:4px}
 </div>
 
 <div class="scrim" id="scrim" hidden></div>
+<div class="viewer" id="viewer" role="dialog" aria-modal="true" aria-label="사진 크게 보기" hidden>
+  <div class="bar"><span id="viewer-count"></span><button type="button" id="viewer-close" aria-label="닫기"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div class="stage" id="viewer-stage"></div>
+</div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
   <div class="grab"></div>
   <div class="sheet-head">
@@ -229,15 +248,30 @@ const DOW = ["일","월","화","수","목","금","토"];
 const FMT = {reel:"릴스", post:"피드", story:"스토리", qa:"무물", live:"라방", ad:"광고", meeting:"일정", free:"자율", etc:"기타"};
 const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 
-const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const rich = s => esc(s).replace(/https?:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u.length > 42 ? u.slice(0, 40) + "…" : u}</a>`);
+const LINK = /⟦([^|⟧]*)\|([^⟧]*)⟧/g;  // 시트 링크: ⟦문구|주소⟧
+const plain = s => String(s ?? "").replace(LINK, "$1");
+const escRaw = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const esc = s => escRaw(plain(s));
+const safeUrl = u => /^https?:\/\//i.test(u) ? u : "#";
+const autolink = t => escRaw(t).replace(/https?:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u.length > 42 ? u.slice(0, 40) + "…" : u}</a>`);
+function rich(s) {
+  s = String(s ?? ""); let out = "", last = 0;
+  for (const m of s.matchAll(LINK)) {
+    out += autolink(s.slice(last, m.index));
+    out += `<a class="ref" href="${escRaw(safeUrl(m[2]))}" target="_blank" rel="noopener">${escRaw(m[1] || "링크")}</a>`;
+    last = m.index + m[0].length;
+  }
+  return out + autolink(s.slice(last));
+}
+const gallery = (imgs, label) => imgs && imgs.length ? `<div class="gallery">${label ? `<div class="lb">${esc(label)}</div>` : ""}${imgs.map((src, i) =>
+  `<button type="button" data-view-imgs="${escRaw(imgs.join("|"))}" data-i="${i}" aria-label="사진 ${i + 1} 크게 보기"><img src="${escRaw(src)}" alt="" loading="lazy" decoding="async"></button>`).join("")}</div>` : "";
 const pad = n => String(n).padStart(2, "0");
 const key = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const parse = k => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
 const md = k => { const d = parse(k); return `${d.getMonth() + 1}.${d.getDate()}`; };
 const mdDow = k => { const d = parse(k); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${DOW[d.getDay()]}요일`; };
 const TODAY = key(new Date());
-const normT = s => (s || "").replace(/[\s\p{P}\p{S}]/gu, "");
+const normT = s => plain(s || "").replace(/[\s\p{P}\p{S}]/gu, "");
 const similar = (a, b) => { a = normT(stripFmt(a)); b = normT(stripFmt(b)); if (a.length < 4 || b.length < 4) return a === b;
   return a.includes(b.slice(0, 6)) || b.includes(a.slice(0, 6)); };
 
@@ -252,7 +286,7 @@ function fmtOf(s) {
   if (/스토리/.test(s)) return "story";
   return "etc";
 }
-const stripFmt = s => (s || "").replace(/^[\s🙏🎀]*\[(릴스|캐러셀|게시글|피드)\]\s*/u, "").trim();
+const stripFmt = s => plain(s || "").replace(/^[\s🙏🎀]*\[(릴스|캐러셀|게시글|피드)\]\s*/u, "").trim();
 
 /* ---------------- index everything by date ---------------- */
 const P = Object.fromEntries(DATA.products.map(p => [p.id, p]));
@@ -308,9 +342,10 @@ function dayGroups(d) { // 하루 칸을 콘텐츠 단위로 묶기: 주제/콘�
 }
 DATA.months.filter(m => m.kind === "grid").forEach(m => m.days.forEach(d => {
   const {topics, stories} = dayGroups(d);
-  topics.forEach(g => {
+  topics.forEach((g, gi) => {
     const first = topicTitle(g[0].text);
-    const entry = {src: "month", mid: m.id, day: d, fmt: fmtOf(first), title: stripFmt(first) || first, sort: 1, fields: g};
+    const entry = {src: "month", mid: m.id, day: d, fmt: fmtOf(first), title: stripFmt(first) || first, sort: 1, fields: g,
+      images: gi === 0 ? d.images : undefined};
     const list = byDate[d.date] || [];
     if (/커머스|공구/.test(first) && list.some(e => e.src === "slot" && e.fmt !== "story")) return;
     const dup = list.findIndex(e => e.src === "event" && !e.holiday && similar(e.title, first));
@@ -374,13 +409,16 @@ function entryHTML(e, idx, opts = {}) {
   if (p && !opts.noProduct) meta.push(`<span><i class="dotc" style="--c:${p.color}"></i> ${esc(pname(e.pid))}</span>`);
   if (e.src === "slot" && e.slot.label) meta.push(`<span>${esc(e.slot.label)}</span>`);
   if (e.src === "slot" && e.fmt === "story" && e.slot.items.length > 1) meta.push(`<span>컷 ${e.slot.items.length}개</span>`);
+  const nImg = e.src === "slot" ? e.slot.items.reduce((n, it) => n + (it.__images || []).length, 0)
+    : e.src === "month" ? (e.images || []).length : 0;
+  if (nImg) meta.push(`<span>사진 ${nImg}</span>`);
   if (e.src === "month") meta.push(`<span>${esc(DATA.months.find(m => m.id === e.mid).name)} 월간 기획</span>`);
   if (e.src === "event" && !p && !e.holiday) meta.push(`<span>일정</span>`);
   if (e.src === "event" && p) meta.push(`<span>캘린더 메모</span>`);
   let prev = "";
   if (e.src === "slot") {
     const notes = e.slot.notes.join(" · ");
-    const first = e.slot.items[0] ? Object.values(e.slot.items[0])[0] : "";
+    const first = e.slot.items.map(it => Object.entries(it).find(([k]) => k !== "__images")?.[1]).find(Boolean) || "";
     prev = notes || first;
   }
   const label = e.holiday ? "휴일" : FMT[e.fmt];
@@ -444,7 +482,7 @@ $("#btn-today").onclick = () => { sel = TODAY; cur = parse(TODAY); cur.setDate(1
 /* ---------------- sheet ---------------- */
 const fieldHTML = (label, text) => `<div class="field"><div class="lb">${esc(label)}</div><div class="tx">${rich(text)}</div></div>`;
 function openSheet(meta, title, body) {
-  $("#sheet-meta").innerHTML = meta; $("#sheet-title").textContent = title; $("#sheet-body").innerHTML = body;
+  $("#sheet-meta").innerHTML = meta; $("#sheet-title").textContent = plain(title); $("#sheet-body").innerHTML = body;
   const sh = $("#sheet"), sc = $("#scrim");
   sh.hidden = sc.hidden = false;
   $("#sheet-body").scrollTop = 0;
@@ -467,12 +505,39 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet()
   });
 })();
 
+/* ---------------- 사진 크게 보기 ---------------- */
+let viewerBack = null;
+function openViewer(imgs, i) {
+  const v = $("#viewer"), stage = $("#viewer-stage");
+  stage.innerHTML = imgs.map(src => `<div><img src="${escRaw(src)}" alt="" decoding="async"></div>`).join("");
+  v.hidden = false;
+  const count = () => { $("#viewer-count").textContent = `${Math.round(stage.scrollLeft / stage.clientWidth) + 1} / ${imgs.length}`; };
+  stage.onscroll = count;
+  requestAnimationFrame(() => { stage.scrollLeft = i * stage.clientWidth; count(); });
+  viewerBack = document.activeElement;
+  $("#viewer-close").focus({preventScroll: true});
+}
+function closeViewer() {
+  const v = $("#viewer"); if (v.hidden) return false;
+  v.hidden = true; $("#viewer-stage").innerHTML = "";
+  viewerBack?.focus?.({preventScroll: true});
+  return true;
+}
+document.addEventListener("click", ev => {
+  const b = ev.target.closest("[data-view-imgs]"); if (!b) return;
+  ev.stopPropagation();
+  openViewer(b.dataset.viewImgs.split("|"), +b.dataset.i);
+});
+$("#viewer-close").onclick = closeViewer;
+$("#viewer-stage").addEventListener("click", ev => { if (ev.target.tagName !== "IMG") closeViewer(); });
+document.addEventListener("keydown", ev => { if (ev.key === "Escape" && closeViewer()) ev.stopImmediatePropagation(); }, true);
+
 function slotBody(p, s) {
   let h = "";
   if (s.notes.length) h += fieldHTML("메모", s.notes.join("\n"));
   const many = s.items.length > 1;
   s.items.forEach((it, i) => {
-    const inner = Object.entries(it).map(([k, v]) => fieldHTML(k, v)).join("");
+    const inner = Object.entries(it).filter(([k]) => k !== "__images").map(([k, v]) => fieldHTML(k, v)).join("") + gallery(it.__images, "비주얼 예시");
     h += many ? `<div class="cut"><div class="lb">컷 ${i + 1}</div>${inner}</div>` : inner;
   });
   return h || `<div class="empty">상세 내용이 없어요.</div>`;
@@ -487,7 +552,7 @@ function openEntry(e) {
   if (e.src === "month") {
     const m = DATA.months.find(x => x.id === e.mid);
     const meta = `<span class="pill ghost">${esc(m.name)} 월간 기획</span><span class="pill line">${FMT[e.fmt]}</span>${e.day.holiday ? `<span class="pill line">${esc(e.day.holiday)}</span>` : ""}`;
-    return openSheet(meta, e.title, e.fields.map(f => fieldHTML(f.label, f.text)).join(""));
+    return openSheet(meta, e.title, e.fields.map(f => fieldHTML(f.label, f.text)).join("") + gallery(e.images, "사진"));
   }
   const p = e.pid ? P[e.pid] : null;
   const meta = (p ? `<span class="pill" style="--c:${p.color}">${esc(pname(p.id))}</span>` : "") + `<span class="pill ghost">${mdDow(e.ev.date || sel)}</span>`;
@@ -557,7 +622,7 @@ function productPage(p) {
   return `<div class="hero" style="--c:${p.color}"><span class="swatch"></span>
       <div style="display:flex;gap:8px;align-items:center;margin-top:4px">${statusOf(p)}${p.round ? `<span class="pill ghost">${esc(p.round)}</span>` : ""}</div>
       <h2>${esc(p.name)}</h2>${p.fullName ? `<div class="full">${esc(p.fullName)}</div>` : ""}
-      <dl class="kv">${kv}</dl></div>
+      <dl class="kv">${kv}</dl>${gallery(p.images)}</div>
     ${long.map(x => `<details class="fold"><summary>${esc(x.label.length > 24 ? "참고" : x.label)}</summary><div class="fold-body">${rich(x.label.length > 24 ? x.label + "\n" + x.text : x.text)}</div></details>`).join("")}
     <div class="sec-h"><h3>업로드 타임라인</h3><small>피드 ${reels} · 스토리 ${stories}</small></div>
     <div class="tl" data-pid="${p.id}">${tl}</div>`;
@@ -625,13 +690,13 @@ $("#month-pager").addEventListener("click", ev => {
     const fields = c[0] === "s" ? [stories[+c.slice(1)]] : topics[+c.slice(1)];
     const t = c[0] === "s" ? storyTitle(fields[0].text) : topicTitle(fields[0].text);
     openSheet(`<span class="pill ghost">${esc(m.name)} ${parse(d.date).getDate()}일 ${DOW[parse(d.date).getDay()]}</span>${d.holiday ? `<span class="pill line">${esc(d.holiday)}</span>` : ""}`,
-      stripFmt(t) || t, fields.map(f => fieldHTML(f.label, f.text)).join(""));
+      stripFmt(t) || t, fields.map(f => fieldHTML(f.label, f.text)).join("") + (c === "t0" ? gallery(d.images, "사진") : ""));
   } else {
     const it = m.sections[+a].items[+c];
     const f = it.story ? "story" : fmtOf(it.title);
     const meta = `<span class="pill ghost">${esc(m.name)} · ${esc(m.sections[+a].title)}</span><span class="pill line">${FMT[f]}</span>${it.done ? `<span class="pill" style="--c:var(--accent-soft)">이행 완료</span>` : ""}`;
     openSheet(meta, stripFmt(it.title.replace(/\n/g, " ")) || it.title,
-      Object.entries(it.fields).map(([k, v]) => fieldHTML(k, v)).join("") + (it.reaction ? fieldHTML("기대 팔로워 반응", it.reaction) : ""));
+      Object.entries(it.fields).map(([k, v]) => fieldHTML(k, v)).join("") + (it.reaction ? fieldHTML("기대 팔로워 반응", it.reaction) : "") + gallery(it.images, "사진"));
   }
 });
 

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import openpyxl
 
+import sheet_media
+
 HERE = Path(__file__).parent
 CONFIG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 SHEET_ID = CONFIG["sheet_id"]
@@ -22,6 +24,8 @@ YEAR = CONFIG.get("year", 2026)
 XLSX = HERE / "sheet.xlsx"
 TEMPLATE = HERE / "template.html"
 OUT = HERE / "duckduck_calendar.html"
+MEDIA = HERE / "media"  # 시트 이미지를 줄여서 저장하는 곳 (앱에서는 media/파일명)
+IMAGES = {}  # 시트 이름 → {(행, 열): [파일명]}
 
 CAL_COLS = "BCDEFGH"  # 월~일
 MEETING_FILL = "FFCFE2F3"
@@ -53,6 +57,13 @@ def fill(cell):
 
 def iso(d):
     return d.strftime("%Y-%m-%d")
+
+
+def row_images(ws, r, cols=None):
+    """r 행에 걸린 이미지 (열 순서)"""
+    cells = IMAGES.get(ws.title.strip(), {})
+    return [f"media/{n}" for c in sorted(c for (rr, c) in cells if rr == r and (cols is None or c in cols))
+            for n in cells[(r, c)]]
 
 
 def top_left_only(ws):
@@ -195,6 +206,8 @@ def parse_product(ws, colors):
             if m.min_col == 2:
                 b_merge[r] = m.min_row
 
+    info_images = [i for r in range(1, header_row) for i in row_images(ws, r)]
+    pending = row_images(ws, header_row)  # 헤더 줄에 걸쳐 놓인 이미지는 첫 행 것
     slots, cur, last_a = [], None, ""
     for r in range(header_row + 1, ws.max_row + 1):
         a = text(ws.cell(a_merge.get(r, r), 1).value)
@@ -204,7 +217,9 @@ def parse_product(ws, colors):
             v = val(r, c)
             if v and v != "-":
                 fields[h] = v
-        if not (a or b or fields):
+        imgs = pending + row_images(ws, r)
+        pending = []
+        if not (a or b or fields or imgs):
             continue
         new_a = a and (r not in a_merge or a_merge[r] == r)
         new_b = b and (r not in b_merge or b_merge[r] == r)
@@ -222,14 +237,17 @@ def parse_product(ws, colors):
                 "items": [],
             }
             slots.append(cur)
-        if not fields:
-            continue
-        if cur["format"].startswith("스토리") or not cur["items"]:
-            cur["items"].append(fields)
-        else:
-            last = cur["items"][-1]
-            for k, v in fields.items():
-                last[k] = (last[k] + "\n\n" + v) if k in last else v
+        if fields:
+            if cur["format"].startswith("스토리") or not cur["items"]:
+                cur["items"].append(fields)
+            else:
+                last = cur["items"][-1]
+                for k, v in fields.items():
+                    last[k] = (last[k] + "\n\n" + v) if k in last else v
+        if imgs:
+            if not cur["items"]:
+                cur["items"].append({})
+            cur["items"][-1].setdefault("__images", []).extend(imgs)
 
     name = ws.title.strip()
     base = norm(name)
@@ -245,6 +263,7 @@ def parse_product(ws, colors):
         "color": color,
         "period": period,
         "info": info,
+        "images": info_images,
         "slots": slots,
     }
 
@@ -288,6 +307,10 @@ def parse_month_grid(ws, month):
         label = a.replace("\n", " ")
         if label == "날짜":
             continue
+        for c, key in week.items():
+            imgs = row_images(ws, r, {c})
+            if imgs:
+                days[key].setdefault("images", []).extend(imgs)
         if label:
             in_extra = label not in GRID_LABELS
         for c, v in cells.items():
@@ -303,7 +326,7 @@ def parse_month_grid(ws, month):
                 days[week[c]]["fields"].append({"label": label, "text": v})
             elif len(v) > 40:
                 notes.append(v)
-    day_list = [{"date": k, **v} for k, v in sorted(days.items()) if v["fields"] or v["holiday"]]
+    day_list = [{"date": k, **v} for k, v in sorted(days.items()) if v["fields"] or v["holiday"] or v.get("images")]
     return {"kind": "grid", "notes": notes, "days": day_list, "extra": extra}
 
 
@@ -324,8 +347,13 @@ def parse_month_sections(ws):
             continue
         if rest.get(2) == "팔로워 반응" and not a:
             continue
+        imgs = row_images(ws, r)
+        if item and imgs and not isinstance(raw_a, bool) and a not in ("True", "False"):
+            item.setdefault("images", []).extend(imgs)
         if isinstance(raw_a, bool) or a in ("True", "False"):
             item = {"done": a == "True" or raw_a is True, "fields": {}}
+            if imgs:
+                item["images"] = imgs
             for c, v in rest.items():
                 if v:
                     item["fields"][cols[c]] = v
@@ -384,10 +412,15 @@ def parse_month_weeks(ws):
             notes += [v for v in [a, *row.values()] if len(v) > 40]
             continue
         done = any(ws.cell(r, c).value is True for c in range(2, ws.max_column + 1))
+        imgs = row_images(ws, r)
+        if item and imgs and not a:
+            item.setdefault("images", []).extend(imgs)
         if a:
             fields = {headers[c]: v for c, v in row.items() if v and c in headers}
             topic = fields.pop(headers.get(2, ""), "")
             item = {"done": done, "title": f"[{a}] {topic}".strip(), "fields": fields}
+            if imgs:
+                item["images"] = imgs
             sections[-1]["items"].append(item)
         elif item:
             for c, v in row.items():
@@ -417,6 +450,14 @@ def main():
     if "--local" not in sys.argv:
         download()
     wb = openpyxl.load_workbook(XLSX, data_only=True)
+    try:
+        links = sheet_media.fetch_links(SHEET_ID)
+    except Exception as e:  # 시트 HTML 보기를 못 읽으면 xlsx 의 셀 링크만 사용
+        print("links: htmlview 실패, xlsx 링크로 대체 -", e)
+        links = {}
+    sheet_media.apply_links(wb, links)
+    IMAGES.update(sheet_media.extract_images(XLSX, MEDIA))
+    print("images:", sum(len(v) for cells in IMAGES.values() for v in cells.values()))
     sheets = [ws for ws in wb.worksheets if ws.sheet_state == "visible"]
     cal = next(ws for ws in sheets if "캘린더" in ws.title)
     product_sheets = [ws for ws in sheets

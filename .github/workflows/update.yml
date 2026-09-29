@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install openpyxl
+      - run: pip install openpyxl pillow
       - name: 시트 받아서 앱 만들기
         run: |
           python build_app.py
