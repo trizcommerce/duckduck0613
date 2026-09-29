@@ -26,6 +26,7 @@ TEMPLATE = HERE / "template.html"
 OUT = HERE / "duckduck_calendar.html"
 MEDIA = HERE / "media"  # 시트 이미지를 줄여서 저장하는 곳 (앱에서는 media/파일명)
 IMAGES = {}  # 시트 이름 → {(행, 열): [파일명]}
+FORMATS = {}  # (시트 이름, 행, 열) → 서식·링크 정보 (sheet_media.CellFormat)
 
 CAL_COLS = "BCDEFGH"  # 월~일
 MEETING_FILL = "FFCFE2F3"
@@ -57,6 +58,22 @@ def fill(cell):
 
 def iso(d):
     return d.strftime("%Y-%m-%d")
+
+
+def shown(ws, r, c, plain):
+    """화면에 보일 칸 글자: 시트의 굵게·색·크기·링크 표시를 넣어서 돌려준다 (구조 판단은 plain 으로)"""
+    f = FORMATS.get((ws.title.strip(), r, c))
+    if not f or not plain:
+        return plain
+    lead = len(f.text) - len(f.text.lstrip())
+    if f.text.strip() == plain:
+        return f.render(lead, lead + len(plain))
+    return f.render_text(plain)
+
+
+def notes_of(ws, r, cells, min_len=40):
+    """행의 긴 글(목표·참고사항 등)을 서식 포함해서"""
+    return [shown(ws, r, c, v) for c, v in cells if len(v) > min_len]
 
 
 def row_images(ws, r, cols=None):
@@ -191,11 +208,11 @@ def parse_product(ws, colors):
                 product_line = head.split(":", 1)[-1].strip()
             if ":" in head and not body:
                 k, v = head.split(":", 1)
-                info.append({"label": k.strip(), "text": v.strip()})
+                info.append({"label": k.strip(), "text": shown(ws, r, 1, v.strip())})
             else:
                 label, _, rest = head.partition(":")
                 body = (rest.strip() + "\n" + body).strip() if rest.strip() else body
-                info.append({"label": label.strip(), "text": body.strip()})
+                info.append({"label": label.strip(), "text": shown(ws, r, 1, body.strip())})
 
     # A/B 는 병합 셀이 많아 값 전파
     a_merge, b_merge = {}, {}
@@ -216,7 +233,7 @@ def parse_product(ws, colors):
         for c, h in headers.items():
             v = val(r, c)
             if v and v != "-":
-                fields[h] = v
+                fields[h] = shown(ws, r, c, v)
         imgs = pending + row_images(ws, r)
         pending = []
         if not (a or b or fields or imgs):
@@ -299,10 +316,10 @@ def parse_month_grid(ws, month):
                 first_week = r
             for c, v in cells.items():
                 if len(v) > 40 and c not in day_hits:
-                    notes.append(v)
+                    notes.append(shown(ws, r, c, v))
             continue
         if week is None:
-            notes += [v for v in [a, *cells.values()] if len(v) > 40]
+            notes += notes_of(ws, r, [(1, a), *cells.items()])
             continue
         label = a.replace("\n", " ")
         if label == "날짜":
@@ -318,14 +335,14 @@ def parse_month_grid(ws, month):
                 continue
             if in_extra:
                 if label:
-                    extra.append({"label": label, "text": v})
+                    extra.append({"label": label, "text": shown(ws, r, c, v)})
                     label = ""
                 else:
-                    extra[-1]["text"] += "\n\n" + v
+                    extra[-1]["text"] += "\n\n" + shown(ws, r, c, v)
             elif c in week and label:
-                days[week[c]]["fields"].append({"label": label, "text": v})
+                days[week[c]]["fields"].append({"label": label, "text": shown(ws, r, c, v)})
             elif len(v) > 40:
-                notes.append(v)
+                notes.append(shown(ws, r, c, v))
     day_list = [{"date": k, **v} for k, v in sorted(days.items()) if v["fields"] or v["holiday"] or v.get("images")]
     return {"kind": "grid", "notes": notes, "days": day_list, "extra": extra}
 
@@ -356,7 +373,7 @@ def parse_month_sections(ws):
                 item["images"] = imgs
             for c, v in rest.items():
                 if v:
-                    item["fields"][cols[c]] = v
+                    item["fields"][cols[c]] = v if c == 3 else shown(ws, r, c, v)
             item["title"] = item["fields"].pop("콘텐츠 주제", "")
             if "[" not in item["title"][:12]:  # 대괄호 포맷이 없는 건 스토리 아이디어
                 if item["title"]:
@@ -376,15 +393,15 @@ def parse_month_sections(ws):
             item = None
             continue
         if not sections:
-            notes += [v for v in [a, *rest.values()] if len(v) > 40]
+            notes += notes_of(ws, r, [(1, a), *rest.items()])
             continue
         if item and not a:
             if rest.get(2):
-                item["reaction"] = (item.get("reaction", "") + "\n" + rest[2]).strip()
+                item["reaction"] = (item.get("reaction", "") + "\n" + shown(ws, r, 2, rest[2])).strip()
             for c in range(3, 7):
                 if rest.get(c):
                     k = cols[c]
-                    item["fields"][k] = (item["fields"].get(k, "") + "\n\n" + rest[c]).strip()
+                    item["fields"][k] = (item["fields"].get(k, "") + "\n\n" + shown(ws, r, c, rest[c])).strip()
     return {"kind": "sections", "notes": notes, "sections": sections}
 
 
@@ -409,14 +426,14 @@ def parse_month_weeks(ws):
             headers = {c: v for c, v in row.items() if v}
             continue
         if not sections:
-            notes += [v for v in [a, *row.values()] if len(v) > 40]
+            notes += notes_of(ws, r, [(1, a), *row.items()])
             continue
         done = any(ws.cell(r, c).value is True for c in range(2, ws.max_column + 1))
         imgs = row_images(ws, r)
         if item and imgs and not a:
             item.setdefault("images", []).extend(imgs)
         if a:
-            fields = {headers[c]: v for c, v in row.items() if v and c in headers}
+            fields = {headers[c]: (v if c == 2 else shown(ws, r, c, v)) for c, v in row.items() if v and c in headers}
             topic = fields.pop(headers.get(2, ""), "")
             item = {"done": done, "title": f"[{a}] {topic}".strip(), "fields": fields}
             if imgs:
@@ -427,10 +444,10 @@ def parse_month_weeks(ws):
                 if not v or c not in headers:
                     continue
                 if "팔로워" in headers[c] and headers[c] == headers.get(3):
-                    item["reaction"] = (item.get("reaction", "") + "\n" + v).strip()
+                    item["reaction"] = (item.get("reaction", "") + "\n" + shown(ws, r, c, v)).strip()
                 else:
                     k = headers[c]
-                    item["fields"][k] = (item["fields"].get(k, "") + "\n\n" + v).strip()
+                    item["fields"][k] = (item["fields"].get(k, "") + "\n\n" + shown(ws, r, c, v)).strip()
     return {"kind": "sections", "notes": notes, "sections": sections}
 
 
@@ -449,13 +466,13 @@ def parse_month(ws):
 def main():
     if "--local" not in sys.argv:
         download()
-    wb = openpyxl.load_workbook(XLSX, data_only=True)
+    wb = openpyxl.load_workbook(XLSX, data_only=True, rich_text=True)
     try:
         links = sheet_media.fetch_links(SHEET_ID)
     except Exception as e:  # 시트 HTML 보기를 못 읽으면 xlsx 의 셀 링크만 사용
         print("links: htmlview 실패, xlsx 링크로 대체 -", e)
         links = {}
-    sheet_media.apply_links(wb, links)
+    FORMATS.update(sheet_media.collect_formats(wb, links))
     IMAGES.update(sheet_media.extract_images(XLSX, MEDIA))
     print("images:", sum(len(v) for cells in IMAGES.values() for v in cells.values()))
     sheets = [ws for ws in wb.worksheets if ws.sheet_state == "visible"]

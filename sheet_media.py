@@ -108,35 +108,163 @@ def fetch_links(sheet_id):
     return out
 
 
-def mark_links(text, links):
-    """셀 글자에서 링크 문구를 찾아 ⟦문구|주소⟧ 로 감싼다. 문구를 못 찾으면 끝에 붙인다."""
-    if not links:
-        return text
-    pos, tail = 0, []
-    for label, url in links:
+# ---------------------------------------------------------------- 글자 서식
+# 앱으로 넘기는 글자에는 두 가지 표시를 끼워 넣는다.
+#   ⟪b u c=ff0000 z=+1⟫ … ⟪/⟫  : 굵게(b) 기울임(i) 밑줄(u) 취소선(s) 글자색(c) 크기(z: -1 작게, +1 크게, +2 더 크게)
+#   ⟦문구|주소⟧                 : 링크
+# 시트 구조를 읽을 때는 표시 없는 글자를 쓰고, 화면에 보일 칸만 표시 있는 글자로 바꾼다.
+FMT_OPEN, FMT_CLOSE_TAG = "⟪", "⟪/⟫"
+PLAIN_COLORS = {"000000", "1F1F1F", "1155CC"}  # 기본 검정, 시트 링크 파랑은 따로 표시하지 않음
+
+
+def _color(font):
+    col = getattr(font, "color", None) if font is not None else None
+    rgb = getattr(col, "rgb", None) if col is not None else None
+    if not isinstance(rgb, str) or len(rgb) < 6:
+        return None  # 테마 색 등은 기본 글자색으로
+    rgb = rgb[-6:].upper()
+    return None if rgb in PLAIN_COLORS else rgb
+
+
+def _style(font, cell_font):
+    """글자 조각의 서식 (조각에 없는 속성은 칸 기본 서식을 따름)"""
+    f = font if font is not None else cell_font
+
+    def get(k):
+        v = getattr(f, k, None)
+        return v if v is not None else getattr(cell_font, k, None)
+
+    has_color = getattr(getattr(f, "color", None), "rgb", None) is not None
+    raw = getattr(getattr(f if has_color else cell_font, "color", None), "rgb", None)
+    link_blue = isinstance(raw, str) and raw.upper().endswith("1155CC")  # 시트 링크 모양은 링크로만 표시
+    size = get("sz")
+    return {
+        "b": bool(get("b")),
+        "i": bool(get("i")),
+        "u": bool(get("u")) and not link_blue,
+        "s": bool(get("strike")),
+        "c": _color(f if has_color else cell_font),
+        "sz": float(size) if size else None,
+    }
+
+
+def cell_runs(cell):
+    """셀 → (글자, [(시작, 끝, 서식)])"""
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    v = cell.value
+    parts = []
+    if isinstance(v, CellRichText):
+        for part in v:
+            if isinstance(part, TextBlock):
+                parts.append((part.text, _style(part.font, cell.font)))
+            else:
+                parts.append((str(part), _style(None, cell.font)))
+    elif isinstance(v, str):
+        parts.append((v, _style(None, cell.font)))
+    text, runs, pos = "", [], 0
+    for t, st in parts:
+        runs.append((pos, pos + len(t), st))
+        text += t
+        pos += len(t)
+    # 크기는 칸 안에서 가장 많이 쓰인 크기를 기준으로 상대 크기만 남김
+    weight = {}
+    for a, b, st in runs:
+        if st["sz"] and text[a:b].strip():
+            weight[st["sz"]] = weight.get(st["sz"], 0) + (b - a)
+    base = max(weight, key=weight.get) if weight else None
+    for _, _, st in runs:
+        d = (st.pop("sz") or base or 0) - (base or 0)
+        st["z"] = "+2" if d >= 5 else "+1" if d >= 1.5 else "-1" if d <= -1.5 else ""
+    return text, runs
+
+
+def _token(st):
+    bits = [k for k in ("b", "i", "u", "s") if st.get(k)]
+    if st.get("c"):
+        bits.append("c=" + st["c"])
+    if st.get("z"):
+        bits.append("z=" + st["z"])
+    return " ".join(bits)
+
+
+def _link_spans(text, links):
+    spans, tail, pos = [], [], 0
+    for label, url in links or []:
         key = label.split("\n")[0].strip()
         i = text.find(key, pos) if key else -1
         if i < 0:
-            tail.append(f"{LINK_OPEN}{key or '링크'}{LINK_SEP}{url}{LINK_CLOSE}")
-            continue
-        piece = f"{LINK_OPEN}{key}{LINK_SEP}{url}{LINK_CLOSE}"
-        text = text[:i] + piece + text[i + len(key):]
-        pos = i + len(piece)
-    return (text + "\n" + " ".join(tail)).strip() if tail else text
+            tail.append((key or "링크", url))
+        else:
+            spans.append((i, i + len(key), url))
+            pos = i + len(key)
+    return spans, tail
 
 
-def apply_links(wb, links_by_sheet):
-    """워크북 셀 값에 링크 표시를 끼워 넣는다 (htmlview 가 없으면 xlsx 의 셀 링크로 대체)"""
+class CellFormat:
+    """한 칸의 글자·서식·링크. render() 로 표시가 들어간 글자를 만든다."""
+
+    def __init__(self, text, runs, links):
+        self.text, self.runs = text, runs
+        self.spans, self.tail = _link_spans(text, links)
+
+    def render(self, start=0, end=None, with_tail=True):
+        end = len(self.text) if end is None else end
+        cuts = {start, end}
+        for a, b, _ in self.runs:
+            cuts.update(x for x in (a, b) if start < x < end)
+        for a, b, _ in self.spans:
+            cuts.update(x for x in (a, b) if start < x < end)
+        cuts = sorted(cuts)
+        out, open_tok = [], ""
+        for a, b in zip(cuts, cuts[1:]):
+            piece = self.text[a:b]
+            if not piece:
+                continue
+            st = next((st for ra, rb, st in self.runs if ra <= a < rb), {})
+            tok = _token(st) if piece.strip() or st.get("u") or st.get("s") else open_tok
+            if tok != open_tok:
+                if open_tok:
+                    out.append(FMT_CLOSE_TAG)
+                if tok:
+                    out.append(f"{FMT_OPEN}{tok}⟫")
+                open_tok = tok
+            url = next((u for sa, sb, u in self.spans if sa <= a < sb), None)
+            out.append(f"{LINK_OPEN}{piece}{LINK_SEP}{url}{LINK_CLOSE}" if url else piece)
+        if open_tok:
+            out.append(FMT_CLOSE_TAG)
+        s = "".join(out)
+        if with_tail and self.tail:
+            s += "\n" + " ".join(f"{LINK_OPEN}{k}{LINK_SEP}{u}{LINK_CLOSE}" for k, u in self.tail)
+        return s
+
+    def render_text(self, sub):
+        """칸 글자 중 sub 부분만 (없으면 sub 그대로)"""
+        i = self.text.find(sub) if sub else -1
+        return self.render(i, i + len(sub), with_tail=False) if i >= 0 else sub
+
+
+def collect_formats(wb, links_by_sheet):
+    """{(시트, 행, 열): CellFormat} 를 만들고, 셀 값은 표시 없는 글자로 되돌린다"""
+    from openpyxl.cell.rich_text import CellRichText
+    out = {}
     for ws in wb.worksheets:
-        links = links_by_sheet.get(ws.title.strip().strip("[]").strip())
-        if links is None:
+        name = ws.title.strip()
+        links = links_by_sheet.get(name.strip("[]").strip())
+        if links is None:  # htmlview 를 못 읽었으면 xlsx 의 셀 링크
             links = {(c.row, c.column): [(str(c.value or "").strip(), c.hyperlink.target)]
                      for row in ws.iter_rows() for c in row
                      if c.hyperlink is not None and c.hyperlink.target}
-        for (r, c), ls in links.items():
-            cell = ws.cell(r, c)
-            if isinstance(cell.value, str) or cell.value is None:
-                cell.value = mark_links(str(cell.value or ""), ls)
+        for row in ws.iter_rows():
+            for c in row:
+                if not isinstance(c.value, (str, CellRichText)):
+                    continue
+                text, runs = cell_runs(c)
+                cl = links.get((c.row, c.column))
+                if cl or any(_token(st) for _, _, st in runs):
+                    out[(name, c.row, c.column)] = CellFormat(text, runs, cl)
+                if isinstance(c.value, CellRichText):
+                    c.value = text
+    return out
 
 
 # ---------------------------------------------------------------- 이미지

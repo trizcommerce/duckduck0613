@@ -119,7 +119,7 @@ a{color:var(--accent)}
 .hero h2{font-family:var(--display);font-size:24px;font-weight:700;line-height:1.2;margin:6px 0 2px;word-break:keep-all;text-wrap:balance}
 .hero .full{font-size:13px;color:var(--muted)}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin-top:14px;font-size:14px}
-.kv dt{color:var(--muted);white-space:nowrap}
+.kv dt{color:var(--muted);max-width:6.5em;word-break:keep-all}
 .kv dd{margin:0;white-space:pre-line;word-break:keep-all}
 .status{display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:600}
 .status.live{background:var(--sun);color:#fff}
@@ -172,6 +172,15 @@ details.fold[open] summary::after{transform:rotate(-135deg);margin-top:4px}
 .gallery button{display:block;aspect-ratio:1;border-radius:10px;overflow:hidden;background:var(--surface-2);max-width:100%}
 .gallery img{width:100%;height:100%;object-fit:cover;display:block}
 .hero .gallery{padding-bottom:0}
+.fx-b{font-weight:700}
+.fx-i{font-style:italic}
+.fx-u{text-decoration:underline;text-underline-offset:2px}
+.fx-s{text-decoration:line-through}
+.fx-u.fx-s{text-decoration:underline line-through}
+.fx-c{color:var(--fc)}
+.fx-z1{font-size:1.14em} .fx-z2{font-size:1.3em;line-height:1.45} .fx-zm{font-size:.88em}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .fx-c{color:color-mix(in srgb,var(--fc) 55%,#fff)}}
+:root[data-theme="dark"] .fx-c{color:color-mix(in srgb,var(--fc) 55%,#fff)}
 .tx a.ref{display:inline-flex;align-items:center;gap:3px;font-weight:600;text-decoration:none;border-bottom:1.5px solid color-mix(in srgb,var(--accent) 45%,transparent)}
 .tx a.ref::after{content:"↗";font-size:.85em}
 .viewer{position:fixed;inset:0;z-index:60;background:rgba(8,10,8,.94);display:flex;flex-direction:column}
@@ -249,19 +258,42 @@ const FMT = {reel:"릴스", post:"피드", story:"스토리", qa:"무물", live:
 const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
 
 const LINK = /⟦([^|⟧]*)\|([^⟧]*)⟧/g;  // 시트 링크: ⟦문구|주소⟧
-const plain = s => String(s ?? "").replace(LINK, "$1");
+const FX = /⟪([^⟫]*)⟫/g;               // 시트 글자 서식: ⟪b u c=FF0000 z=+1⟫ … ⟪/⟫
+const plain = s => String(s ?? "").replace(FX, "").replace(LINK, "$1");
 const escRaw = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const esc = s => escRaw(plain(s));
 const safeUrl = u => /^https?:\/\//i.test(u) ? u : "#";
 const autolink = t => escRaw(t).replace(/https?:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u.length > 42 ? u.slice(0, 40) + "…" : u}</a>`);
-function rich(s) {
-  s = String(s ?? ""); let out = "", last = 0;
+function linkify(s) {
+  let out = "", last = 0;
   for (const m of s.matchAll(LINK)) {
     out += autolink(s.slice(last, m.index));
     out += `<a class="ref" href="${escRaw(safeUrl(m[2]))}" target="_blank" rel="noopener">${escRaw(m[1] || "링크")}</a>`;
     last = m.index + m[0].length;
   }
   return out + autolink(s.slice(last));
+}
+function fxOpen(tok) { // "b u c=FF0000 z=+1" → <span class=… style=…>
+  const cls = [], style = [];
+  tok.split(/\s+/).forEach(t => {
+    if (/^[bius]$/.test(t)) cls.push("fx-" + t);
+    else if (/^c=[0-9A-Fa-f]{6}$/.test(t)) { cls.push("fx-c"); style.push(`--fc:#${t.slice(2)}`); }
+    else if (t === "z=+1") cls.push("fx-z1");
+    else if (t === "z=+2") cls.push("fx-z2");
+    else if (t === "z=-1") cls.push("fx-zm");
+  });
+  return cls.length ? `<span class="${cls.join(" ")}"${style.length ? ` style="${style.join(";")}"` : ""}>` : "<span>";
+}
+function rich(s) { // 시트 서식·링크를 HTML 로 (짝이 안 맞는 표시는 무시)
+  s = String(s ?? ""); let out = "", last = 0, open = false;
+  for (const m of s.matchAll(FX)) {
+    out += linkify(s.slice(last, m.index));
+    if (open) { out += "</span>"; open = false; }
+    if (m[1] !== "/") { out += fxOpen(m[1]); open = true; }
+    last = m.index + m[0].length;
+  }
+  out += linkify(s.slice(last));
+  return open ? out + "</span>" : out;
 }
 const gallery = (imgs, label) => imgs && imgs.length ? `<div class="gallery">${label ? `<div class="lb">${esc(label)}</div>` : ""}${imgs.map((src, i) =>
   `<button type="button" data-view-imgs="${escRaw(imgs.join("|"))}" data-i="${i}" aria-label="사진 ${i + 1} 크게 보기"><img src="${escRaw(src)}" alt="" loading="lazy" decoding="async"></button>`).join("")}</div>` : "";
@@ -327,10 +359,10 @@ DATA.events.forEach(ev => {
 
 const isTopic = l => l === "주제" || l === "콘텐츠";
 const topicTitle = t => { // "[릴스]" 한 줄 + 제목 줄로 나뉜 경우 합치기
-  const ls = t.split("\n").map(x => x.trim()).filter(Boolean);
+  const ls = plain(t).split("\n").map(x => x.trim()).filter(Boolean);
   return /^\[[^\]]+\]$/.test(ls[0] || "") && ls[1] ? `${ls[0]} ${ls[1]}` : (ls[0] || "");
 };
-const storyTitle = t => t.replace(/^[✔\s]+/, "").replace(/^\[스토리\]\s*>?\s*/, "").split("\n")[0] || "스토리";
+const storyTitle = t => plain(t).replace(/^[✔\s]+/, "").replace(/^\[스토리\]\s*>?\s*/, "").split("\n")[0] || "스토리";
 function dayGroups(d) { // 하루 칸을 콘텐츠 단위로 묶기: 주제/콘텐츠 행마다 새 묶음, 스토리는 따로
   const topics = [], stories = [];
   d.fields.forEach(x => {
@@ -599,7 +631,7 @@ function statusOf(p) {
 }
 function productPage(p) {
   const pi = DATA.products.indexOf(p);
-  const short = p.info.filter(x => x.text.length < 260 && !/소구점|키워드/.test(x.label));
+  const short = p.info.filter(x => plain(x.text).length < 260 && !/소구점|키워드/.test(x.label));
   const long = p.info.filter(x => !short.includes(x) && x.label !== "공구상품");
   const kv = short.filter(x => x.label !== "공구상품").map(x => `<dt>${esc(x.label)}</dt><dd>${rich(x.text)}</dd>`).join("");
   const byDay = [];
@@ -639,9 +671,10 @@ $("#prod-pager").addEventListener("click", ev => {
 /* ---------------- months ---------------- */
 function noteFolds(notes) {
   return notes.map((n, i) => {
-    const lines = n.split("\n").map(x => x.trim()).filter(Boolean);
-    const head = lines[0].replace(/^[💡🚩\s]+/u, "").slice(0, 30);
-    return `<details class="fold"${i === 0 ? " open" : ""}><summary>${esc(head)}</summary><div class="fold-body">${rich(lines.slice(1).join("\n") || n)}</div></details>`;
+    const cut = n.search(/\n/);  // 첫 줄은 접는 제목, 나머지는 서식 그대로 본문
+    const head = plain(cut < 0 ? n : n.slice(0, cut)).trim().replace(/^[💡🚩\s]+/u, "").slice(0, 30);
+    const body = cut < 0 ? n : n.slice(cut + 1).replace(/^\s*\n/, "");
+    return `<details class="fold"${i === 0 ? " open" : ""}><summary>${esc(head)}</summary><div class="fold-body">${rich(body.trim() ? body : n)}</div></details>`;
   }).join("");
 }
 function monthPage(m) {
