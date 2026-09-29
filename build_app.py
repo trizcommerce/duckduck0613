@@ -276,7 +276,7 @@ def dater(tab_name):
 def parse_period(s, date_of=None):
     date_of = date_of or (lambda mo, d, wd=None: dt.date(YEAR, mo, d))
     if CONFIG.get("infer_year") == "weekday":
-        w = re.search(r"(\d{1,2})\s*(?:/|월)\s*(\d{1,2})\s*일?\s*\(\s*([월화수목금토일])[^)]*\)\s*~\s*"
+        w = re.search(r"(\d{1,2})\s*(?:/|월)\s*(\d{1,2})\s*일?\s*\(\s*([월화수목금토일])[^)]*\)[^~\n]{0,12}?[~\-–]\s*"
                       r"(\d{1,2})\s*(?:/|월)\s*(\d{1,2})", s)
         if w:
             a = date_of(int(w[1]), int(w[2]), w[3])
@@ -321,6 +321,9 @@ def find_header(ws):
         for c in (1, 2):
             if text(ws.cell(r, c).value) in DATE_HEADERS:
                 return r, c
+    for r in range(1, 16):  # '구분 | 일정 | 노출방식 …' 처럼 한 칸 밀린 표
+        if text(ws.cell(r, 3).value) == "일정" and text(ws.cell(r, 4).value) == "노출방식":
+            return r, 3
     for r in range(1, 16):  # 날짜 칸 제목이 비어 있는 표: '피드 주제' 두 칸 왼쪽이 날짜
         for c in (3, 4):
             if text(ws.cell(r, c).value) == "피드 주제":
@@ -380,9 +383,10 @@ def parse_product(ws, colors):
         title_col = next((c for c, h in head.items() if "주제" in h), None)
         topic_cols = [c for c in (kind_col, title_col) if c]
         headers = {c: h for c, h in head.items() if c != date_col and c not in topic_cols}
-    else:  # 일정 | 주제 | 제작 의도 | …
+    else:  # 일정 | 주제 | 제작 의도 | …   또는   일정 | 노출방식 | 비주얼 설명 | 비주얼
         topic_cols = [date_col + 1]
         headers = {c: h for c, h in head.items() if c > date_col + 1}
+    expose_style = head.get(date_col + 1) == "노출방식"
 
     info, period, product_line, top_lines = [], None, None, []
     for r in range(1, header_row):
@@ -390,6 +394,19 @@ def parse_product(ws, colors):
         top_lines += t.split("\n")
         c0 = 1 if val(r, 1) else 2
         if not t:
+            continue
+        pair = [(c, val(r, c)) for c in range(1, 7) if val(r, c)]
+        if expose_style and len(pair) >= 2 and len(pair[0][1]) <= 30 and "📍" not in pair[0][1]:
+            label = re.sub(r"\s*\n\s*", " ", pair[0][1]).strip()
+            info.append({"label": label, "text": shown(ws, r, pair[1][0], pair[1][1])})
+            for c, v in pair[2:]:
+                if len(v) > 40:
+                    info.append({"label": "참고", "text": shown(ws, r, c, v)})
+            top_lines += pair[1][1].split("\n")
+            if "공구" in label and ("진행" in label or "일정" in label):
+                period = period or parse_period(pair[1][1], date_of)
+            if "제품" in label:
+                product_line = product_line or pair[1][1].split("\n")[0].strip()
             continue
         if "📍" not in t and "\n" not in t:  # 업로드 일자형: "방효선 X 쑥세럼&크림 8/26(수) ~ 8/30(일)"
             period = period or parse_period(t, date_of)
@@ -449,6 +466,9 @@ def parse_product(ws, colors):
             m = DATE_RE.search(a)
             if upload_style:
                 fmt, title, notes = kind_topic(*(tops + ["", ""])[:2]) if len(topic_cols) == 2 else kind_topic("", b)
+            elif expose_style:
+                found = FORMAT_RE.search(b)
+                fmt, title, notes = (found[1] if found else "기타"), "", []
             else:
                 fmt, title, notes = split_topic(b)
             cur = {
@@ -459,6 +479,8 @@ def parse_product(ws, colors):
                 "notes": notes,
                 "items": [],
             }
+            if expose_style and not cur["label"]:
+                cur["label"] = slot_label(b) if re.search(r"D\s*[-+]\s*\d+|OPEN|오픈|마감", b, re.I) else ""
             if upload_style and not cur["label"] and re.fullmatch(r"(D\s*[-+]\s*\d+|OPEN|오픈|마감)(\s*피드)?", title, re.I):
                 cur["label"] = slot_label(title)  # 제목 칸에 적힌 D-1 / OPEN / 마감
             slots.append(cur)
@@ -477,6 +499,21 @@ def parse_product(ws, colors):
     def plain_of(v):
         return re.sub(r"⟪[^⟫]*⟫|⟦([^|⟧]*)\|[^⟧]*⟧", lambda x: x.group(1) or "", v)
 
+    for sl in slots:  # 노출방식형: 비주얼 설명의 "✅주제 : …" 를 제목으로
+        if not expose_style or sl["title"]:
+            continue
+        desc = next((plain_of(v) for it in sl["items"] for k, v in it.items() if "설명" in k), "")
+        m = re.search(r"주제[^:\n]{0,12}:\s*(.+)", desc)
+        line = (m[1] if m else next((ln for ln in desc.split("\n") if ln.strip()), "")).strip(" ✅●/")
+        sl["title"] = line[:60]
+    if expose_style and period:  # 날짜 오타(요일 불일치 등)로 연도가 튀면 공구 기간에 가까운 해로
+        open_day = dt.date.fromisoformat(period[0])
+        for sl in slots:
+            if sl["date"]:
+                d0 = dt.date.fromisoformat(sl["date"])
+                cands = [dt.date(y, d0.month, d0.day) for y in (open_day.year - 1, open_day.year, open_day.year + 1)
+                         if _valid(y, d0.month, d0.day)]
+                sl["date"] = iso(min(cands, key=lambda x: abs((x - open_day).days)))
     for sl in slots:
         if not upload_style:
             break
@@ -528,7 +565,8 @@ def parse_product(ws, colors):
         color = PALETTE[sum(map(ord, base)) % len(PALETTE)]
     round_m = re.search(r"(\d+)차", name)
     seller = CONFIG["seller"].removesuffix("님")
-    display = re.sub(r"^\d{2}\.\d{1,2}[\s_]*", "", name)             # "26.09 방탄커피" → "방탄커피"
+    display = re.sub(r"\s*\([\d.~\-\s]*\)\s*$", "", name)          # "헤베스템 13차 (929-104)" → "헤베스템 13차"
+    display = re.sub(r"^\d{2}\.\d{1,2}[\s_]*", "", display)          # "26.09 방탄커피" → "방탄커피"
     display = re.sub(rf"^{re.escape(seller)}\s*[xX×]\s*", "", display)  # "방효선x헤어 2종" → "헤어 2종"
     return {
         "id": "p" + re.sub(r"\W", "", base) + (round_m[1] if round_m else ""),
